@@ -216,4 +216,16 @@ __marimo__/
 .streamlit/secrets.toml
 
 *.lock
-*.DS_Store
+*.DS_Storeruns/
+checkpoints/
+*.zip
+*.mp4
+*.pkl
+wandb/
+__pycache__/
+*.pyc
+.venv/
+venv/
+orca/
+*.egg-info/
+.DS_Store
