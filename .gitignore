@@ -229,3 +229,16 @@ venv/
 orca/
 *.egg-info/
 .DS_Store
+runs/
+videos/
+checkpoints/
+*.zip
+*.mp4
+*.pkl
+wandb/
+__pycache__/
+*.pyc
+.venv/
+orca/
+*.egg-info/
+.DS_Store
