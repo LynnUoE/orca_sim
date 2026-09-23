@@ -97,6 +97,57 @@ def oracle_policy(env):
     return policy
 
 
+def edge_hover_policy(env, inside_steps: int = 5, outside_steps: int = 5):
+    """Oscillate across the tolerance cone edge without ever completing a hold.
+
+    This is the exploit `align_bonus` invites. The hold counter resets every
+    time the cube leaves the cone, so an unbudgeted per-step in-cone bonus pays
+    out forever: it is the stock task's stalling exploit wearing a new hat. The
+    budget in `CubeReorientContinuous.step` caps the payout at `hold_steps` per
+    goal, which this measures.
+    """
+    adr = env._cube_qpos_adr
+    period = inside_steps + outside_steps
+
+    def policy(e, t):
+        tol = e.success_tolerance_rad
+        offset = tol * (0.5 if (t % period) < inside_steps else 1.5)
+        # Tip the red face `offset` off the goal, around an arbitrary axis.
+        goal = e._goal_dir / (np.linalg.norm(e._goal_dir) + 1e-12)
+        axis = np.cross(goal, [0.0, 0.0, 1.0])
+        if np.linalg.norm(axis) < 1e-6:
+            axis = np.cross(goal, [1.0, 0.0, 0.0])
+        axis /= np.linalg.norm(axis)
+        target = (
+            goal * np.cos(offset)
+            + np.cross(axis, goal) * np.sin(offset)
+        )
+        e.data.qpos[adr + 3 : adr + 7] = shortest_arc_quat(target)
+        ang = e._cube_qvel_adr + 3
+        e.data.qvel[ang : ang + 3] = 0.0
+        mujoco.mj_forward(e.model, e.data)
+        return np.zeros(e.action_space.shape, dtype=np.float32)
+
+    return policy
+
+
+def zero_policy_free_solves(episodes: int = 30) -> int:
+    """Solves a motionless hand collects at the easiest curriculum angle.
+
+    Must be zero. It was 26% of episodes at 30 degrees: the cube tipped ~21
+    degrees while dropping onto the palm after reset, and the goal had been
+    drawn from its pre-drop orientation. A single seed-0 episode (the check
+    above) happens to miss it, which is how it survived runs 1-8.
+    """
+    env = CubeReorientContinuous()
+    env.goal_angle_deg = env.curriculum_max_deg = env.curriculum_min_deg
+    solves = 0
+    for ep in range(episodes):
+        solves += run(env, lambda e, t: np.zeros(e.action_space.shape), 400, seed=100 + ep)["solves"]
+    env.close()
+    return solves
+
+
 def main() -> None:
     print("\n" + "=" * 68)
     print("STOCK TASK  (orca_sim.OrcaHandRightCubeOrientation)")
@@ -122,6 +173,10 @@ def main() -> None:
     rows.append(("oracle (pinned on goal)", run(oracle_env, oracle_policy(oracle_env), steps, seed=2)))
     oracle_env.close()
 
+    hover_env = CubeReorientContinuous(max_episode_steps=steps)
+    rows.append(("hover on the cone edge", run(hover_env, edge_hover_policy(hover_env), steps, seed=3)))
+    hover_env.close()
+
     print(f"  {'policy':<28}{'return':>10}{'solves':>9}{'steps':>8}")
     print("  " + "-" * 55)
     for label, res in rows:
@@ -129,6 +184,7 @@ def main() -> None:
 
     do_nothing = rows[0][1]
     oracle = rows[2][1]
+    hover = rows[3][1]
 
     print("\n  assertions:")
     ok = True
@@ -147,6 +203,25 @@ def main() -> None:
     ok &= check
     print(f"    [{'ok' if check else 'FAIL'}] solving pays far more than idling "
           f"({oracle['return']:+.2f} vs {do_nothing['return']:+.2f})")
+
+    free = zero_policy_free_solves()
+    check = free == 0
+    ok &= check
+    print(f"    [{'ok' if check else 'FAIL'}] a motionless hand never solves, even at the "
+          f"easiest curriculum angle ({free} solves in 30 episodes)")
+
+    # 400 steps of edge-hovering would collect 40 payouts if align_bonus were
+    # unbudgeted. Budgeted, it can only ever collect hold_steps per goal, and
+    # hovering never solves so the goal only changes on the timeout.
+    env_ref = CubeReorientContinuous()
+    ceiling = env_ref.align_bonus * env_ref.hold_steps * (
+        1 + steps // max(env_ref.goal_timeout_steps or steps, 1)
+    )
+    env_ref.close()
+    check = hover["solves"] == 0 and hover["return"] <= ceiling + 1.0
+    ok &= check
+    print(f"    [{'ok' if check else 'FAIL'}] hovering on the cone edge cannot be farmed "
+          f"({hover['return']:+.2f}, {hover['solves']} solves, budget ceiling {ceiling:.1f})")
 
     print("\n  " + ("all checks passed" if ok else "SOMETHING IS WRONG -- do not train"))
     print()

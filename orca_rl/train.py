@@ -11,6 +11,7 @@ Everything lands in ``runs/<name>/``: checkpoints, the VecNormalize statistics
 from __future__ import annotations
 
 import argparse
+import signal
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +24,7 @@ from stable_baselines3.common.vec_env import (
     VecNormalize,
 )
 
-from orca_rl.task import CubeReorientContinuous
+from orca_rl.task import LEGACY_OBS_DIM, CubeReorientContinuous, resolve_stats_path
 
 
 class TaskMetricsCallback(BaseCallback):
@@ -41,6 +42,8 @@ class TaskMetricsCallback(BaseCallback):
         self._lengths: list[int] = []
         self._goal_angles: list[float] = []
         self._solve_rates: list[float] = []
+        self._goals: list[int] = []
+        self._goal_solves: list[int] = []
 
     def _on_step(self) -> bool:
         for info, done in zip(self.locals["infos"], self.locals["dones"]):
@@ -51,6 +54,8 @@ class TaskMetricsCallback(BaseCallback):
             self._lengths.append(int(info.get("elapsed_steps", 0)))
             self._goal_angles.append(float(info.get("goal_angle_deg", 0.0)))
             self._solve_rates.append(float(info.get("curriculum_solve_rate", 0.0)))
+            self._goals.append(int(info.get("episode_goals", 0)))
+            self._goal_solves.append(int(info.get("episode_goal_solves", 0)))
 
         if len(self._successes) >= self.window:
             self.logger.record("task/solves_per_episode", float(np.mean(self._successes)))
@@ -59,11 +64,49 @@ class TaskMetricsCallback(BaseCallback):
             self.logger.record("task/episode_length", float(np.mean(self._lengths)))
             self.logger.record("task/goal_angle_deg", float(np.mean(self._goal_angles)))
             self.logger.record("task/curriculum_solve_rate", float(np.mean(self._solve_rates)))
+            # Goal attempts are the unit of opportunity now: how many the policy
+            # gets through per episode, and what fraction of them it converts.
+            goals = float(np.sum(self._goals))
+            self.logger.record("task/goals_per_episode", goals / len(self._goals))
+            self.logger.record(
+                "task/goal_success_rate",
+                float(np.sum(self._goal_solves)) / goals if goals else 0.0,
+            )
+            self._goals.clear()
+            self._goal_solves.clear()
             self._successes.clear()
             self._drops.clear()
             self._lengths.clear()
             self._goal_angles.clear()
             self._solve_rates.clear()
+        return True
+
+
+class EpochsUsedCallback(BaseCallback):
+    """Log how many of `--n-epochs` PPO actually ran before target_kl stopped it.
+
+    Not cosmetic. SB3 checks the KL *inside* the minibatch loop and bails out of
+    the whole epoch loop, so a rollout can be abandoned partway through its first
+    pass. Measured on run8's first 457 updates: 456 of them stopped at epoch 0.
+    `--n-epochs 10` was decorative -- every sample collected was used once or
+    less, which is the worst sample reuse PPO can have, and it had been that way
+    for the entire 460M steps of run1-run6.
+
+    If this sits at 1.0, the policy is moving the full `target_kl` budget on the
+    first pass: lower `--lr` or raise `--batch-size` until a few epochs survive.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last = 0
+
+    def _on_rollout_end(self) -> None:
+        n = int(getattr(self.model, "_n_updates", 0))
+        if n > self._last:
+            self.logger.record("train/epochs_used", n - self._last)
+        self._last = n
+
+    def _on_step(self) -> bool:
         return True
 
 
@@ -117,6 +160,7 @@ def build_vec_env(
     env_kwargs: dict,
     subproc: bool,
     vecnormalize_path: Path | None = None,
+    gamma: float = 0.99,
 ):
     fns = [make_env_fn(seed, i, env_kwargs) for i in range(n_envs)]
     venv = SubprocVecEnv(fns) if (subproc and n_envs > 1) else DummyVecEnv(fns)
@@ -129,16 +173,22 @@ def build_vec_env(
         normalized = VecNormalize.load(str(vecnormalize_path), venv)
         normalized.training = True
         normalized.norm_reward = True
+        normalized.gamma = gamma
         print(f"resumed normalization stats from {vecnormalize_path}")
         return normalized
 
-    return VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
+    # VecNormalize scales rewards by a running estimate of the *discounted*
+    # return, with its own gamma (default 0.99) -- keep it in step with PPO's.
+    return VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=gamma)
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--name", default="ppo_reorient")
-    p.add_argument("--timesteps", type=int, default=20_000_000)
+    p.add_argument("--timesteps", type=int, default=20_000_000,
+                   help="steps to train in THIS invocation. With --resume they are added "
+                        "on top of the checkpoint's count (SB3 reset_num_timesteps=False), "
+                        "so resuming a 160M model with --timesteps 8_000_000 stops at 168M")
     p.add_argument("--n-envs", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="auto", help="auto | cpu | cuda | mps")
@@ -146,10 +196,17 @@ def parse_args() -> argparse.Namespace:
 
     # PPO
     p.add_argument("--n-steps", type=int, default=512)
-    p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument("--batch-size", type=int, default=1024,
+                   help="was 256. At 256 / lr 3e-4 every one of run8's 628 updates hit "
+                        "target_kl inside the first epoch, so --n-epochs 10 never ran; "
+                        "replaying one rollout, 1024 / 1.5e-4 completes 4 epochs for the "
+                        "same 16 gradient steps. Watch train/epochs_used")
     p.add_argument("--n-epochs", type=int, default=10)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--gamma", type=float, default=0.99)
+    p.add_argument("--lr", type=float, default=1.5e-4)
+    p.add_argument("--gamma", type=float, default=0.995,
+                   help="0.99 is a 1s horizon at this 100Hz control rate, but a goal "
+                        "attempt runs up to 1.5s; the success bonus was being discounted "
+                        "away before the policy could act on it")
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--clip-range", type=float, default=0.2)
     p.add_argument("--ent-coef", type=float, default=0.0,
@@ -167,20 +224,39 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-episode-steps", type=int, default=400)
     p.add_argument("--randomize-physics", action="store_true")
     p.add_argument("--goal-mode", default="curriculum", choices=["curriculum", "axis", "random"])
+    p.add_argument("--goal-timeout", type=int, default=150,
+                   help="steps a single goal attempt gets before it is retired unsolved "
+                        "and a fresh one is drawn. 0 disables (the old behaviour, where "
+                        "one unreachable goal burned the rest of the episode)")
+    p.add_argument("--shaping-mode", default="angle", choices=["angle", "cos"],
+                   help="'cos' is the original potential and its gradient vanishes at "
+                        "the goal; 'angle' pays the same per degree everywhere")
+    p.add_argument("--curriculum-metric", default="goal_success",
+                   choices=["goal_success", "episode_rate"])
+    p.add_argument("--curriculum-window", type=int, default=40,
+                   help="goal attempts (or episodes, for episode_rate) per decision")
     p.add_argument("--curriculum-start-deg", type=float, default=30.0)
     p.add_argument("--curriculum-step-deg", type=float, default=5.0,
                    help="2.5 gives a smoother difficulty curve than the default 5")
-    p.add_argument("--curriculum-up-rate", type=float, default=1.0)
+    p.add_argument("--curriculum-up-rate", type=float, default=0.55,
+                   help="goal_success: fraction of attempts solved needed to add "
+                        "--curriculum-step-deg. The old episode_rate bar of 1.0 solve "
+                        "per episode was never reached and pinned difficulty at ~45 deg")
     p.add_argument("--curriculum-down-rate", type=float, default=0.25)
     p.add_argument("--hold-steps", type=int, default=10,
                    help="consecutive aligned steps a solve requires")
     p.add_argument("--success-tolerance-deg", type=float, default=15.0)
-    p.add_argument("--spin-penalty", type=float, default=0.0,
-                   help="penalise cube angular speed while inside the tolerance cone. "
-                        "Targets overshoot, which diagnose.py measures as ~85%% of failed holds")
-    p.add_argument("--align-bonus", type=float, default=0.0,
-                   help="per-step reward while inside the cone; capped by hold_steps "
-                        "because the solve then fires and the goal moves")
+    p.add_argument("--spin-penalty", type=float, default=0.05,
+                   help="penalise cube angular speed near the goal. Targets overshoot, "
+                        "which diagnose.py measures as 59%% of failed holds")
+    p.add_argument("--spin-band", type=float, default=1.0,
+                   help="width of that band, in multiples of the success tolerance. "
+                        "Keep it <= 1: at 2.0 the band swallows the whole 30-degree "
+                        "curriculum goal range, and idling is taxed 2.6 per episode -- "
+                        "which is how you get a policy that clamps the cube and freezes")
+    p.add_argument("--align-bonus", type=float, default=0.1,
+                   help="per-step reward while inside the cone, budgeted to hold_steps "
+                        "payouts per goal so edge-hovering cannot farm it")
     p.add_argument("--max-log-std", type=float, default=0.0,
                    help="hard cap on log_std (0 => std <= 1). Guards the runaway above")
     p.add_argument("--checkpoint-every", type=int, default=500_000)
@@ -201,24 +277,42 @@ def main() -> None:
         max_episode_steps=args.max_episode_steps,
         randomize_physics=args.randomize_physics,
         goal_mode=args.goal_mode,
+        goal_timeout_steps=args.goal_timeout,
+        shaping_mode=args.shaping_mode,
         curriculum_start_deg=args.curriculum_start_deg,
         curriculum_step_deg=args.curriculum_step_deg,
+        curriculum_metric=args.curriculum_metric,
+        curriculum_window=args.curriculum_window,
         curriculum_up_rate=args.curriculum_up_rate,
         curriculum_down_rate=args.curriculum_down_rate,
         hold_steps=args.hold_steps,
         success_tolerance_rad=np.deg2rad(args.success_tolerance_deg),
         align_bonus=args.align_bonus,
         spin_penalty=args.spin_penalty,
+        spin_band=args.spin_band,
     )
 
     resume_path = Path(args.resume) if args.resume else None
-    stats_path = (resume_path.parent / "vecnormalize.pkl") if resume_path else None
+    stats_path = resolve_stats_path(resume_path) if resume_path else None
+    if resume_path is not None and resume_path.exists():
+        # Checkpoints from before the controller target joined the observation
+        # (runs 1-8, 54-dim) can still be resumed, in their own layout.
+        from stable_baselines3.common.save_util import load_from_zip_file
+        saved, _, _ = load_from_zip_file(str(resume_path), load_data=True, device="cpu")
+        if int(saved["observation_space"].shape[0]) == LEGACY_OBS_DIM:
+            env_kwargs["obs_include_target"] = False
+            print("resuming a legacy 54-dim policy: controller target NOT observed. "
+                  "Start fresh to get the fixed observation.")
 
     venv = build_vec_env(
         args.n_envs, args.seed, env_kwargs,
         subproc=not args.no_subproc,
         vecnormalize_path=stats_path,
+        gamma=args.gamma,
     )
+    if stats_path is not None and not stats_path.exists():
+        print(f"WARNING: {stats_path} not found -- observation statistics restart from "
+              "zero, and the resumed policy will see differently-scaled inputs")
 
     if resume_path is not None:
         if not resume_path.exists():
@@ -237,6 +331,10 @@ def main() -> None:
                 n_steps=args.n_steps,
                 batch_size=args.batch_size,
                 n_epochs=args.n_epochs,
+                # These two were missing, so --gamma / --gae-lambda were
+                # silently ignored on every resumed run despite the docstring.
+                gamma=args.gamma,
+                gae_lambda=args.gae_lambda,
             ),
         )
         model.tensorboard_log = resolve_tensorboard_dir(run_dir)
@@ -268,6 +366,7 @@ def main() -> None:
 
     callbacks = [
         TaskMetricsCallback(),
+        EpochsUsedCallback(),
         ClampLogStdCallback(args.max_log_std),
         CheckpointCallback(
             save_freq=max(args.checkpoint_every // args.n_envs, 1),
@@ -280,6 +379,15 @@ def main() -> None:
     print(f"obs {venv.observation_space.shape}  act {venv.action_space.shape}  envs {args.n_envs}")
     print(f"rollout = {args.n_envs} x {args.n_steps} = {args.n_envs * args.n_steps} transitions")
     print(f"logging to {run_dir}")
+
+    # A run started in the background (`nohup ... &`) inherits SIGINT as
+    # *ignored*, so Ctrl-C / `kill -INT` does nothing and the save below never
+    # runs -- that is how run8 had to be killed without a final save. Route
+    # SIGTERM (plain `kill <pid>`) into the same save-and-exit path.
+    def _stop(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _stop)
 
     try:
         model.learn(

@@ -24,23 +24,24 @@ from pathlib import Path
 
 import numpy as np
 
-from orca_rl.task import CubeReorientContinuous
+from orca_rl.task import CubeReorientContinuous, obs_kwargs_for_model, resolve_stats_path
 
 
 def build_actor(args):
     if args.policy == "random":
-        return lambda env, obs: env.action_space.sample()
+        return (lambda env, obs: env.action_space.sample()), {}
     if args.policy == "zero":
-        return lambda env, obs: np.zeros(env.action_space.shape, dtype=np.float32)
+        return (lambda env, obs: np.zeros(env.action_space.shape, dtype=np.float32)), {}
 
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
     model = PPO.load(args.model, device="cpu")
-    stats = Path(args.vecnormalize) if args.vecnormalize else Path(args.model).parent / "vecnormalize.pkl"
+    obs_kw = obs_kwargs_for_model(model)
+    stats = Path(args.vecnormalize) if args.vecnormalize else resolve_stats_path(Path(args.model))
     normalizer = None
     if stats.exists():
-        normalizer = VecNormalize.load(str(stats), DummyVecEnv([lambda: CubeReorientContinuous()]))
+        normalizer = VecNormalize.load(str(stats), DummyVecEnv([lambda: CubeReorientContinuous(**obs_kw)]))
         normalizer.training = False
         normalizer.norm_reward = False
     else:
@@ -53,7 +54,7 @@ def build_actor(args):
         action, _ = model.predict(x, deterministic=True)
         return action[0]
 
-    return act
+    return act, obs_kw
 
 
 def main() -> None:
@@ -63,6 +64,9 @@ def main() -> None:
     p.add_argument("--policy", default="model", choices=["model", "random", "zero"])
     p.add_argument("--episodes", type=int, default=30)
     p.add_argument("--max-episode-steps", type=int, default=400)
+    p.add_argument("--goal-timeout", type=int, default=None,
+                   help="steps per goal attempt before it is retired unsolved "
+                        "(default: the env's own; 0 disables)")
     p.add_argument("--goal-angle", type=float, default=None,
                    help="pin the curriculum at this difficulty (default: whatever the env starts at)")
     p.add_argument("--hold-steps", type=int, default=10,
@@ -73,9 +77,11 @@ def main() -> None:
     if args.policy == "model" and args.model is None:
         p.error("--model is required unless --policy is random or zero")
 
-    act = build_actor(args)
-    env = CubeReorientContinuous(max_episode_steps=args.max_episode_steps,
-                                 hold_steps=args.hold_steps)
+    act, obs_kw = build_actor(args)
+    env_kwargs = dict(max_episode_steps=args.max_episode_steps, hold_steps=args.hold_steps, **obs_kw)
+    if args.goal_timeout is not None:
+        env_kwargs["goal_timeout_steps"] = args.goal_timeout
+    env = CubeReorientContinuous(**env_kwargs)
     if args.goal_angle is not None:
         env.goal_angle_deg = float(args.goal_angle)
         env.curriculum_min_deg = env.curriculum_max_deg = float(args.goal_angle)
@@ -108,12 +114,30 @@ def main() -> None:
             steps_total += 1
             steps_in_hand += int(info["in_hand"])
 
-            aligned_now = bool(info["aligned"] and info["in_hand"])
+            # A solve or a goal timeout swaps in the next goal *within* this
+            # step, so info["aligned"] / angle_to_goal_deg already describe the
+            # new goal. Reading them as "the cube left the cone" booked every
+            # solve twice -- once as a solve and once as a failed 9-step hold
+            # classed as overshoot (the cube is still turning when it solves).
+            # That artifact was 60-75% of the "overshoot" failures reported for
+            # run6/run8/run9, and it is what spin_penalty was built to fix.
+            goal_changed = tuple(info["goal_dir"]) != current_goal
+            aligned_now = bool(info["aligned"] and info["in_hand"]) and not goal_changed
             steps_aligned += int(aligned_now)
-            min_angle = min(min_angle, info["angle_to_goal_deg"])
+            if not goal_changed:
+                min_angle = min(min_angle, info["angle_to_goal_deg"])
             entered |= aligned_now
 
-            if aligned_now:
+            if info["solved_this_step"]:
+                solves += 1
+                hold_runs.append(env.hold_steps)
+                run_len = 0
+            elif goal_changed:
+                if run_len:                              # timed out mid-hold
+                    hold_runs.append(run_len)
+                    exit_reason["goal timed out mid-hold"] += 1
+                    run_len = 0
+            elif aligned_now:
                 run_len += 1
             elif run_len:
                 # A hold just ended short. Record why, and how fast the cube was
@@ -128,11 +152,6 @@ def main() -> None:
                     exit_reason["overshoot (cube still spinning)"] += 1
                 else:
                     exit_reason["drifted out slowly"] += 1
-                run_len = 0
-
-            if info["solved_this_step"]:
-                solves += 1
-                hold_runs.append(env.hold_steps)
                 run_len = 0
 
             goal_now = tuple(info["goal_dir"])
@@ -164,7 +183,8 @@ def main() -> None:
 
     label = args.policy if args.policy != "model" else Path(args.model).stem
     print(f"\n=== {label} | {args.episodes} episodes | goal angle {env.goal_angle_deg:.0f} deg "
-          f"| tolerance {tol_deg:.0f} deg | hold {env.hold_steps} steps ===\n")
+          f"| tolerance {tol_deg:.0f} deg | hold {env.hold_steps} steps "
+          f"| goal timeout {env.goal_timeout_steps or 'off'} ===\n")
 
     print("REACH -- how close it gets to each goal")
     print(f"  goals handed out          : {n_goals}")

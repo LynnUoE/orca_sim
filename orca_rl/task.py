@@ -30,6 +30,7 @@ next step toward sim-to-real.
 from __future__ import annotations
 
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
@@ -81,28 +82,34 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         goal_mode: str = "curriculum",  # "curriculum" | "axis" | "random"
         resample_goal_on_success: bool = True,
         min_goal_angle_rad: float = np.deg2rad(60.0),
+        goal_timeout_steps: int = 150,
         # --- curriculum (goal_mode="curriculum") ---
         curriculum_start_deg: float = 30.0,
         curriculum_min_deg: float = 25.0,
         curriculum_max_deg: float = 180.0,
         curriculum_step_deg: float = 5.0,
-        curriculum_window: int = 20,
-        curriculum_up_rate: float = 1.0,
+        curriculum_metric: str = "goal_success",  # "goal_success" | "episode_rate"
+        curriculum_window: int = 40,
+        curriculum_up_rate: float = 0.55,
         curriculum_down_rate: float = 0.25,
         # --- actions ---
         action_mode: str = "relative",  # "relative" | "absolute"
         action_scale: float = 0.15,
+        obs_include_target: bool = True,
         # --- reward weights ---
         success_bonus: float = 10.0,
+        shaping_mode: str = "angle",  # "angle" | "cos"
         shaping_coef: float = 1.0,
         drop_penalty: float = 5.0,
         action_rate_penalty: float = 0.002,
-        align_bonus: float = 0.0,
-        spin_penalty: float = 0.0,
+        align_bonus: float = 0.1,
+        spin_penalty: float = 0.05,
+        spin_band: float = 1.0,
         # --- domain randomization ---
         randomize_physics: bool = False,
         randomization: dict[str, float] | None = None,
         # --- reset ---
+        reset_settle_steps: int = 60,
         initial_red_face: str = "random",
         cube_pos_xy_jitter: float | tuple[float, float] = 0.005,
         **kwargs: Any,
@@ -111,17 +118,25 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
             raise ValueError("goal_mode must be 'curriculum', 'axis' or 'random'")
         if action_mode not in {"relative", "absolute"}:
             raise ValueError("action_mode must be 'relative' or 'absolute'")
+        if shaping_mode not in {"angle", "cos"}:
+            raise ValueError("shaping_mode must be 'angle' or 'cos'")
+        if curriculum_metric not in {"goal_success", "episode_rate"}:
+            raise ValueError("curriculum_metric must be 'goal_success' or 'episode_rate'")
 
         # Needed before super().__init__ because it calls _get_obs().
         self._goal_dir = AXIS_GOALS[0].copy()
         self._obs_noise_rad = 0.0
+        self.obs_include_target = bool(obs_include_target)
 
         self.hold_steps = int(hold_steps)
+        self.reset_settle_steps = int(reset_settle_steps)
         self.in_hand_height = float(in_hand_height)
         self.require_contact = bool(require_contact)
         self.goal_mode = goal_mode
         self.resample_goal_on_success = bool(resample_goal_on_success)
         self.min_goal_angle_rad = float(min_goal_angle_rad)
+        self.goal_timeout_steps = int(goal_timeout_steps)
+        self.curriculum_metric = curriculum_metric
         self.curriculum_min_deg = float(curriculum_min_deg)
         self.curriculum_max_deg = float(curriculum_max_deg)
         self.curriculum_step_deg = float(curriculum_step_deg)
@@ -129,15 +144,18 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         self.curriculum_up_rate = float(curriculum_up_rate)
         self.curriculum_down_rate = float(curriculum_down_rate)
         self._solve_rates: deque[float] = deque(maxlen=self.curriculum_window)
+        self._goal_outcomes: deque[float] = deque(maxlen=self.curriculum_window)
         self.goal_angle_deg = float(curriculum_start_deg)
         self.action_mode = action_mode
         self.action_scale = float(action_scale)
         self.success_bonus = float(success_bonus)
+        self.shaping_mode = shaping_mode
         self.shaping_coef = float(shaping_coef)
         self.drop_penalty = float(drop_penalty)
         self.action_rate_penalty = float(action_rate_penalty)
         self.align_bonus = float(align_bonus)
         self.spin_penalty = float(spin_penalty)
+        self.spin_band = float(spin_band)
         self.randomize_physics = bool(randomize_physics)
         self.randomization = {
             "cube_mass": 0.30,        # +-30% relative
@@ -181,9 +199,13 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         }
 
         self._prev_target = np.zeros(self.model.nu, dtype=np.float64)
-        self._prev_alignment = 0.0
+        self._prev_potential = 0.0
         self._hold_counter = 0
         self._successes = 0
+        self._goal_age = 0
+        self._align_budget = self.hold_steps
+        self._episode_goals = 0
+        self._episode_goal_solves = 0
 
         obs = self._get_obs()
         self.observation_space = spaces.Box(
@@ -230,50 +252,84 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         )
         return goal / (np.linalg.norm(goal) + 1e-12)
 
-    def _update_curriculum(self) -> None:
-        """Widen the goal angle when the policy is solving, narrow it when not.
+    def _step_curriculum(self, window: deque[float]) -> None:
+        """Move the difficulty one notch if the window is decisive, else wait."""
+        if len(window) < self.curriculum_window:
+            return
+        mean = float(np.mean(window))
+        if mean >= self.curriculum_up_rate:
+            self.goal_angle_deg = min(
+                self.goal_angle_deg + self.curriculum_step_deg, self.curriculum_max_deg
+            )
+            window.clear()
+        elif mean <= self.curriculum_down_rate:
+            self.goal_angle_deg = max(
+                self.goal_angle_deg - self.curriculum_step_deg, self.curriculum_min_deg
+            )
+            window.clear()
 
-        Two things this deliberately does NOT do, both learned the hard way on
-        a 20M-step run whose difficulty never moved off the floor:
+    def _update_curriculum_on_goal(self, solved: bool) -> None:
+        """Difficulty follows the fraction of *goal attempts* that succeed.
 
-        * It does not compare raw solve *counts*. An episode that ends in a drop
-          after 90 steps cannot physically fit two solves, so counting them
-          punished the policy for a short episode and ratcheted difficulty down
-          every time the drop rate rose. Rates are normalized to a full episode.
+        The previous rule measured solves per episode and asked for >= 1.0 to
+        level up. Measured on run6 that ceiling is unreachable: the policy sat
+        at 0.6 solves/episode from 40M to 160M steps and the angle equilibrated
+        at ~45 degrees forever. The quantity is also contaminated -- an episode
+        that ends in a drop at step 90 cannot fit a solve, so difficulty was
+        coupled to the drop rate.
 
-        * It does not react to a single episode. Solves per episode are wildly
-          overdispersed here (mean 0.84, max 4, ~half of episodes zero), so a
-          per-episode rule random-walks: one zero drops 5 degrees, one good
-          episode adds them back. Averaged over a window it moves only on
-          evidence, and the window is cleared after a change so the next
-          decision is measured at the new difficulty.
+        Per-goal success has neither problem. Each goal attempt is bounded by
+        `goal_timeout_steps`, so the denominator is a fixed unit of opportunity,
+        and the target band (up at >= 0.55, down at <= 0.25) is the usual
+        "keep the student near its own success threshold" rule.
+
+        Attempts still running when the episode ends are not counted: they had
+        less than a full budget, which is the same contamination in a new hat.
         """
-        if self.goal_mode != "curriculum":
+        if self.goal_mode != "curriculum" or self.curriculum_metric != "goal_success":
+            return
+        self._goal_outcomes.append(float(solved))
+        self._step_curriculum(self._goal_outcomes)
+
+    def _update_curriculum(self) -> None:
+        """Legacy episode-rate rule, kept behind `curriculum_metric`."""
+        if self.goal_mode != "curriculum" or self.curriculum_metric != "episode_rate":
             return
 
         steps = max(int(self._elapsed_steps), 1)
         rate = self._successes * (self.max_episode_steps / steps)
         self._solve_rates.append(float(rate))
+        self._step_curriculum(self._solve_rates)
 
-        if len(self._solve_rates) < self.curriculum_window:
-            return
+    def _retire_goal(self, solved: bool, resample: bool = True) -> None:
+        """Close the books on the current goal attempt and hand out the next.
 
-        mean_rate = float(np.mean(self._solve_rates))
-        if mean_rate >= self.curriculum_up_rate:
-            self.goal_angle_deg = min(
-                self.goal_angle_deg + self.curriculum_step_deg, self.curriculum_max_deg
-            )
-            self._solve_rates.clear()
-        elif mean_rate <= self.curriculum_down_rate:
-            self.goal_angle_deg = max(
-                self.goal_angle_deg - self.curriculum_step_deg, self.curriculum_min_deg
-            )
-            self._solve_rates.clear()
+        Before this existed a goal stayed up until it was solved or the episode
+        ended. Measured on run6: goals that were never solved burned a median of
+        377 steps out of a 400-step episode, so a full episode contained 1.9
+        goal attempts and the cube was still being actively moved (1.3 rad/s) --
+        the policy was not stuck, it was failing slowly. Capping the attempt
+        turns the same wall-clock into 3-5 attempts, and replaying the same
+        run6 policy with a 150-step cap raised solves/episode 0.87 -> 1.10
+        without any retraining.
+        """
+        self._episode_goals += 1
+        self._episode_goal_solves += int(solved)
+        self._update_curriculum_on_goal(solved)
+        self._goal_age = 0
+        self._align_budget = self.hold_steps
+        if resample:
+            self._goal_dir = self._sample_goal()
 
     @property
     def curriculum_solve_rate(self) -> float:
-        """Windowed solve rate the curriculum is currently acting on."""
-        return float(np.mean(self._solve_rates)) if self._solve_rates else 0.0
+        """Windowed value the curriculum is currently acting on."""
+        window = (
+            self._goal_outcomes
+            if self.curriculum_metric == "goal_success"
+            else self._solve_rates
+        )
+        return float(np.mean(window)) if window else 0.0
 
     def _sample_goal(self) -> np.ndarray:
         """Draw a goal the cube does not already satisfy.
@@ -298,6 +354,26 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
 
     def _alignment(self) -> float:
         return float(np.dot(self._cube_red_face_world_normal(), self._goal_dir))
+
+    def _goal_angle_rad(self) -> float:
+        return float(np.arccos(np.clip(self._alignment(), -1.0, 1.0)))
+
+    def _potential(self) -> float:
+        """Shaping potential; the step reward is its increase. Higher is closer.
+
+        `cos` was the original choice and its gradient dies exactly where the
+        task gets hard: d(cos t)/dt -> 0 as t -> 0, so a degree of progress at
+        5 degrees out pays 9% of what a degree pays at 60 degrees out. Measured
+        on run6 that is precisely where the policy stalls -- the median goal it
+        failed came to rest 13.9 degrees away against a 15-degree tolerance,
+        grazing the cone edge with almost no reward left to pull it in.
+
+        Shaping on the angle itself pays the same per degree everywhere, and is
+        normalized by pi so a full 180-degree reorientation is worth 1.0.
+        """
+        if self.shaping_mode == "cos":
+            return self._alignment()
+        return -self._goal_angle_rad() / np.pi
 
     # ------------------------------------------------------------- in-hand-ness
 
@@ -337,14 +413,25 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
             base[:n_hand] += self.np_random.normal(
                 scale=self._obs_noise_rad, size=n_hand
             )
-        return np.concatenate(
-            [
-                base,
-                self._cube_red_face_world_normal(),
-                self._goal_dir,
-                np.array([self._alignment()], dtype=np.float64),
-            ]
-        )
+        parts = [
+            base,
+            self._cube_red_face_world_normal(),
+            self._goal_dir,
+            np.array([self._alignment()], dtype=np.float64),
+        ]
+        # The position-servo target, in the same [-1, 1] units as the action.
+        #
+        # In relative mode the action is a delta on this target, so it is the
+        # integrator state of the controller -- and it was not observable. It
+        # differs from qpos exactly when it matters: a finger pressing on the
+        # cube sits short of its target, and kp * (target - qpos) *is* the grip
+        # force. Measured on run6/run8, targets sat at a ctrlrange rail 77% of
+        # the time with a mean 0.17-halfspan gap to the actual joint angle: the
+        # policy was driving bang-bang because it could not see where its own
+        # targets were. Without this the task is not Markov in the action.
+        if self.obs_include_target and hasattr(self, "_ctrl_center"):
+            parts.append((self._prev_target - self._ctrl_center) / self._ctrl_halfspan)
+        return np.concatenate(parts)
 
     def _get_info(self) -> dict[str, Any]:
         return {
@@ -360,6 +447,9 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
             "aligned": self._aligned(),
             "hold_counter": self._hold_counter,
             "successes": self._successes,
+            "goal_age": self._goal_age,
+            "episode_goals": self._episode_goals,
+            "episode_goal_solves": self._episode_goal_solves,
             "dropped": self._cube_dropped(),
             "elapsed_steps": self._elapsed_steps,
             "goal_angle_deg": self.goal_angle_deg,
@@ -407,14 +497,44 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         self._apply_randomization()
 
         obs, _ = super().reset(seed=seed, options=options)
+        self._settle_cube()
 
         self._goal_dir = self._sample_goal()
-        self._prev_target = np.asarray(self._compose_ctrl_from_qpos(), dtype=np.float64)
-        self._prev_alignment = self._alignment()
+        # Continue from the targets the hand actually held while the cube
+        # settled. Re-deriving them from qpos here would snap every servo to
+        # its cube-deflected angle on the first step -- the fingers let go and
+        # the cube rolls ~10 degrees and slides ~18 mm before the policy acts.
+        self._prev_target = np.asarray(self.data.ctrl, dtype=np.float64).copy()
+        self._prev_potential = self._potential()
         self._hold_counter = 0
         self._successes = 0
+        self._goal_age = 0
+        self._align_budget = self.hold_steps
+        self._episode_goals = 0
+        self._episode_goal_solves = 0
 
         return self._get_obs(), self._get_info()
+
+    def _settle_cube(self) -> None:
+        """Let the cube land before the goal is drawn from its orientation.
+
+        The cube spawns at 0.19 m and comes to rest on the palm at ~0.174 m,
+        tipping ~21 degrees on the way down and taking 35-50 control steps to
+        stop. The goal used to be drawn from the pre-drop orientation, 22.5-30
+        degrees away -- so a quarter of the time the drop alone carried the red
+        face into the 15-degree cone. Measured: the zero policy "solved" 13 of
+        50 episodes at step ~13, a free +10 that also inflated the curriculum's
+        success rate at exactly the low angles run8 was stuck at.
+
+        The hand holds its reset pose (ctrl pinned to the initial targets) while
+        the cube settles; the parent's own `settle_steps` instead re-targets the
+        servos to the current joint angles every substep, which lets the hand
+        sag under the cube.
+        """
+        if self.reset_settle_steps <= 0:
+            return
+        self.data.ctrl[:] = self._compose_ctrl_from_qpos()
+        mujoco.mj_step(self.model, self.data, nstep=self.reset_settle_steps * self.frame_skip)
 
     def _target_from_action(self, action: np.ndarray) -> np.ndarray:
         action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
@@ -435,15 +555,15 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         self.data.ctrl[:] = target
         mujoco.mj_step(self.model, self.data, nstep=self.frame_skip)
         self._elapsed_steps += 1
+        self._goal_age += 1
 
-        alignment = self._alignment()
         in_hand = self._cube_in_hand()
         dropped = self._cube_dropped()
 
         # Potential-based shaping: telescopes to total improvement, so waiting
         # around earns nothing. Only counted while the cube is actually held,
         # otherwise a mid-air tumble collects free reward.
-        shaping = alignment - self._prev_alignment if in_hand else 0.0
+        shaping = self._potential() - self._prev_potential if in_hand else 0.0
 
         if self._aligned() and in_hand:
             self._hold_counter += 1
@@ -455,47 +575,69 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         reward = self.shaping_coef * shaping
         reward -= self.action_rate_penalty * float(np.sum(rate**2))
 
-        # Paid only while inside the tolerance cone. This cannot be farmed the
-        # way the stock reward could: after hold_steps the solve fires and the
-        # goal moves, so the most it can ever pay per goal is
-        # hold_steps * align_bonus. It exists because a policy that reaches the
+        # Paid only while inside the tolerance cone, and only `hold_steps` times
+        # per goal -- the budget is what makes that true. Without it the counter
+        # resets on every exit, so a policy that oscillates across the cone edge
+        # collects the bonus forever without ever solving: the stock task's
+        # stalling exploit, rebuilt. It exists because a policy that reaches the
         # cone but slides out gets nothing at all otherwise -- the shaping term
         # has already been collected on the way in.
-        if self.align_bonus and self._hold_counter > 0:
+        if self.align_bonus and self._hold_counter > 0 and self._align_budget > 0:
             reward += self.align_bonus
+            self._align_budget -= 1
 
-        # Braking. Measured cause of 85% of failed holds: the cube enters the
-        # cone still spinning at ~4 rad/s and sails straight back out. The
-        # shaping term is ~0 near the goal, so nothing pays the policy to slow
-        # the cube down -- it only ever learned to turn it.
+        # Braking. Measured cause of 59% of failed holds on run6: the cube
+        # enters the cone still spinning (median 1.5 rad/s, p90 7.3) and sails
+        # straight back out, ending the run a median of 9 steps long against a
+        # 10-step bar. The shaping term is ~0 near the goal, so nothing pays the
+        # policy to slow the cube down -- it only ever learned to turn it.
         #
-        # Applied only inside the cone, and proportional to the cube's angular
-        # speed. Unlike a flat in-cone bonus, freezing the fingers does not
-        # collect it: an already-spinning cube keeps spinning unless the
-        # fingers actively arrest it. So this pays for a skill, not stillness.
-        if self.spin_penalty and self._aligned() and in_hand:
-            spin = float(np.linalg.norm(self._cube_qvel()[3:]))
-            reward -= self.spin_penalty * spin
+        # Applied inside a band `spin_band` tolerances wide and proportional to
+        # the cube's angular speed. Unlike a flat in-cone bonus, freezing the
+        # fingers does not collect it: an already-spinning cube keeps spinning
+        # unless the fingers actively arrest it. So this pays for a skill, not
+        # for stillness.
+        #
+        # Keep the band at 1.0. At 2.0 it reaches 30 degrees out, which at the
+        # 30-degree end of the curriculum covers every goal the env hands out:
+        # a do-nothing policy then scores -2.6 per episode purely for the cube
+        # settling on the palm, and the cheapest response to that is to clamp
+        # the cube and stop moving. That is exactly the failure this repo
+        # already hit once with drop_penalty > success_bonus.
+        if self.spin_penalty and in_hand:
+            band = self.spin_band * self.success_tolerance_rad
+            if self._goal_angle_rad() <= band:
+                spin = float(np.linalg.norm(self._cube_qvel()[3:]))
+                reward -= self.spin_penalty * spin
 
         if solved:
             reward += self.success_bonus
             self._successes += 1
             self._hold_counter = 0
-            if self.resample_goal_on_success:
-                self._goal_dir = self._sample_goal()
+
+        timed_out = (
+            not solved
+            and self.goal_timeout_steps > 0
+            and self._goal_age >= self.goal_timeout_steps
+        )
+        if solved or timed_out:
+            self._retire_goal(
+                solved, resample=timed_out or self.resample_goal_on_success
+            )
 
         if dropped:
             reward -= self.drop_penalty
 
         # Recompute after any goal change so the next delta is measured
         # against the new goal rather than jumping.
-        self._prev_alignment = self._alignment()
+        self._prev_potential = self._potential()
 
         terminated = bool(dropped)
         truncated = bool(self._elapsed_steps >= self.max_episode_steps)
 
         info = self._get_info()
         info["solved_this_step"] = bool(solved)
+        info["goal_timed_out"] = bool(timed_out)
         info["shaping"] = float(shaping)
         if terminated or truncated:
             info["episode_successes"] = self._successes
@@ -505,6 +647,30 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
             self.render()
 
         return self._get_obs(), float(reward), terminated, truncated, info
+
+
+LEGACY_OBS_DIM = 54  # runs 1-8: no controller target in the observation
+
+
+def obs_kwargs_for_model(model: Any) -> dict[str, Any]:
+    """Env kwargs that reproduce the observation a saved policy was trained on."""
+    return {"obs_include_target": int(model.observation_space.shape[0]) != LEGACY_OBS_DIM}
+
+
+def resolve_stats_path(model_path: Path) -> Path:
+    """The VecNormalize stats that belong to a saved model.
+
+    `final_model.zip` sits next to `vecnormalize.pkl`, but a checkpoint
+    `checkpoints/ppo_<N>_steps.zip` sits next to `ppo_vecnormalize_<N>_steps.pkl`.
+    Only looking for the former meant resuming from a checkpoint -- the normal
+    way to recover a crashed run -- silently restarted the observation
+    statistics from zero.
+    """
+    step_suffix = model_path.stem.removeprefix("ppo_")
+    checkpoint_stats = model_path.parent / f"ppo_vecnormalize_{step_suffix}.pkl"
+    if model_path.stem.startswith("ppo_") and checkpoint_stats.exists():
+        return checkpoint_stats
+    return model_path.parent / "vecnormalize.pkl"
 
 
 def make_env(**kwargs: Any) -> CubeReorientContinuous:

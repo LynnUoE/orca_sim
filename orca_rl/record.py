@@ -20,7 +20,7 @@ import imageio.v2 as imageio
 import mujoco
 import numpy as np
 
-from orca_rl.task import CubeReorientContinuous
+from orca_rl.task import CubeReorientContinuous, obs_kwargs_for_model, resolve_stats_path
 
 WIDTH, HEIGHT = 640, 480
 
@@ -37,18 +37,19 @@ def make_camera(env) -> mujoco.MjvCamera:
 
 def build_actor(args):
     if args.policy == "random":
-        return lambda env, obs: env.action_space.sample()
+        return (lambda env, obs: env.action_space.sample()), {}
     if args.policy == "zero":
-        return lambda env, obs: np.zeros(env.action_space.shape, dtype=np.float32)
+        return (lambda env, obs: np.zeros(env.action_space.shape, dtype=np.float32)), {}
 
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
     model = PPO.load(args.model, device="cpu")
+    obs_kw = obs_kwargs_for_model(model)
     normalizer = None
-    stats = Path(args.vecnormalize) if args.vecnormalize else Path(args.model).parent / "vecnormalize.pkl"
+    stats = Path(args.vecnormalize) if args.vecnormalize else resolve_stats_path(Path(args.model))
     if stats.exists():
-        normalizer = VecNormalize.load(str(stats), DummyVecEnv([lambda: CubeReorientContinuous()]))
+        normalizer = VecNormalize.load(str(stats), DummyVecEnv([lambda: CubeReorientContinuous(**obs_kw)]))
         normalizer.training = False
         normalizer.norm_reward = False
 
@@ -59,7 +60,7 @@ def build_actor(args):
         action, _ = model.predict(x, deterministic=True)
         return action[0]
 
-    return act
+    return act, obs_kw
 
 
 def main() -> None:
@@ -77,8 +78,8 @@ def main() -> None:
     if args.policy == "model" and args.model is None:
         p.error("--model is required unless --policy is random or zero")
 
-    act = build_actor(args)
-    env = CubeReorientContinuous(max_episode_steps=args.max_episode_steps)
+    act, obs_kw = build_actor(args)
+    env = CubeReorientContinuous(max_episode_steps=args.max_episode_steps, **obs_kw)
     renderer = mujoco.Renderer(env.model, height=HEIGHT, width=WIDTH)
 
     frames, solved_total = [], 0

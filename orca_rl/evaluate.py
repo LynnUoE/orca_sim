@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from orca_rl.task import CubeReorientContinuous
+from orca_rl.task import CubeReorientContinuous, obs_kwargs_for_model, resolve_stats_path
 
 
 def load_policy(args):
@@ -39,7 +39,7 @@ def load_policy(args):
     if args.vecnormalize:
         stats = Path(args.vecnormalize)
         if stats.exists():
-            dummy = DummyVecEnv([lambda: CubeReorientContinuous()])
+            dummy = DummyVecEnv([lambda: CubeReorientContinuous(**obs_kwargs_for_model(model))])
             normalizer = VecNormalize.load(str(stats), dummy)
             normalizer.training = False
             normalizer.norm_reward = False
@@ -71,6 +71,10 @@ def main() -> None:
                    help="pin the curriculum at this difficulty for the whole run. Without it "
                         "the curriculum keeps adapting DURING evaluation, so a stronger policy "
                         "gets handed harder goals and cross-run numbers are not comparable")
+    p.add_argument("--goal-timeout", type=int, default=None,
+                   help="steps per goal attempt before it is retired unsolved (default: the "
+                        "env's own, 0 disables). Numbers are only comparable across runs when "
+                        "this matches -- solves/episode depends on how many attempts fit")
     p.add_argument("--hold-steps", type=int, default=10,
                    help="evaluate at the standard bar (10) even if training used a\n                         looser one, so numbers stay comparable across runs")
     p.add_argument("--action-mode", default="relative", choices=["relative", "absolute"])
@@ -79,17 +83,26 @@ def main() -> None:
     if args.policy == "model" and args.model is None:
         p.error("--model is required unless --policy is random or zero")
     if args.model and args.vecnormalize is None:
-        guess = Path(args.model).parent / "vecnormalize.pkl"
-        args.vecnormalize = str(guess) if guess.exists() else None
+        guess = resolve_stats_path(Path(args.model))
+        if guess.exists():
+            args.vecnormalize = str(guess)
+        else:
+            print(f"warning: {guess} not found -- evaluating WITHOUT obs normalization; "
+                  "the numbers below are meaningless for a model trained with it")
 
-    act, _ = load_policy(args)
+    act, model = load_policy(args)
 
-    env = CubeReorientContinuous(
+    env_kwargs = dict(
         max_episode_steps=args.max_episode_steps,
         action_mode=args.action_mode,
         randomize_physics=args.randomize_physics,
         hold_steps=args.hold_steps,
     )
+    if model is not None:
+        env_kwargs.update(obs_kwargs_for_model(model))
+    if args.goal_timeout is not None:
+        env_kwargs["goal_timeout_steps"] = args.goal_timeout
+    env = CubeReorientContinuous(**env_kwargs)
     if args.goal_angle is not None:
         # Freeze the curriculum: same difficulty for every episode and every run.
         env.goal_angle_deg = float(args.goal_angle)
@@ -97,6 +110,7 @@ def main() -> None:
 
     returns, solves, drops, lengths = [], [], [], []
     first_solve_steps, in_hand_frac = [], []
+    goals, goal_solves = [], []
 
     for ep in range(args.episodes):
         obs, info = env.reset(seed=args.seed + ep)
@@ -114,6 +128,8 @@ def main() -> None:
                 break
 
         returns.append(total)
+        goals.append(info["episode_goals"])
+        goal_solves.append(info["episode_goal_solves"])
         solves.append(info["successes"])
         drops.append(bool(info["dropped"]))
         lengths.append(info["elapsed_steps"])
@@ -129,6 +145,11 @@ def main() -> None:
     pinned = f"goal angle {args.goal_angle:.0f} deg" if args.goal_angle is not None else "curriculum adapting (NOT comparable across runs)"
     print(f"\n=== {label}  ({args.episodes} episodes | {pinned} | hold {args.hold_steps}) ===")
     print(f"  solves / episode      : {solves.mean():.2f}  (max {solves.max()})")
+    n_goals = float(np.sum(goals))
+    if n_goals:
+        # The comparable number: episodes differ in length, goal attempts do not.
+        print(f"  goal attempts / episode: {n_goals / args.episodes:.2f}")
+        print(f"  goal success rate     : {100 * np.sum(goal_solves) / n_goals:.0f}%")
     print(f"  episodes with >=1     : {100 * (solves > 0).mean():.0f}%")
     print(f"  drop rate             : {100 * np.mean(drops):.0f}%")
     print(f"  mean episode length   : {np.mean(lengths):.0f} / {args.max_episode_steps}")
