@@ -246,15 +246,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hold-steps", type=int, default=10,
                    help="consecutive aligned steps a solve requires")
     p.add_argument("--success-tolerance-deg", type=float, default=15.0)
-    p.add_argument("--spin-penalty", type=float, default=0.05,
-                   help="penalise cube angular speed near the goal. Targets overshoot, "
-                        "which diagnose.py measures as 59%% of failed holds")
+    p.add_argument("--spin-penalty", type=float, default=0.0,
+                   help="penalise cube angular speed inside the goal cone. Off by default: "
+                        "in run9 (0.05, with --align-bonus 0.1) it raised hold conversion "
+                        "68%% vs 44%% but cut cone entries 33%% vs 44%%, and entries are "
+                        "the bottleneck -- run10 without both was better at 30/45/60 deg")
     p.add_argument("--spin-band", type=float, default=1.0,
                    help="width of that band, in multiples of the success tolerance. "
                         "Keep it <= 1: at 2.0 the band swallows the whole 30-degree "
                         "curriculum goal range, and idling is taxed 2.6 per episode -- "
                         "which is how you get a policy that clamps the cube and freezes")
-    p.add_argument("--align-bonus", type=float, default=0.1,
+    p.add_argument("--align-bonus", type=float, default=0.0,
                    help="per-step reward while inside the cone, budgeted to hold_steps "
                         "payouts per goal so edge-hovering cannot farm it")
     p.add_argument("--max-log-std", type=float, default=0.0,

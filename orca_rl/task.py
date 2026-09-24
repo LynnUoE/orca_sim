@@ -102,8 +102,10 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         shaping_coef: float = 1.0,
         drop_penalty: float = 5.0,
         action_rate_penalty: float = 0.002,
-        align_bonus: float = 0.1,
-        spin_penalty: float = 0.05,
+        # Both off by default: run9 vs run10 (README 复盘六) -- they buy
+        # conversion (68% vs 44%) at a larger cost in reach (33% vs 44%).
+        align_bonus: float = 0.0,
+        spin_penalty: float = 0.0,
         spin_band: float = 1.0,
         # --- domain randomization ---
         randomize_physics: bool = False,
