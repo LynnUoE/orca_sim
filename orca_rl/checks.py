@@ -148,6 +148,38 @@ def zero_policy_free_solves(episodes: int = 30) -> int:
     return solves
 
 
+def reset_cube_drops(episodes: int = 5) -> dict:
+    """drop_mode="reset_cube" under a random policy (which drops constantly).
+
+    A drop must not end the episode, must cost exactly `drop_penalty` (plus the
+    usual small action-rate term), must leave the cube back in the hand, and
+    must not hand out a free solve on the step after it is put back.
+    """
+    env = CubeReorientContinuous(drop_mode="reset_cube")
+    out = {"drops": 0, "terminated": 0, "steps": 0, "worst_excess": 0.0,
+           "back_in_hand": 0, "solve_after_drop": 0}
+    for ep in range(episodes):
+        env.reset(seed=200 + ep)
+        just_dropped = False
+        for t in range(400):
+            _, reward, terminated, truncated, info = env.step(env.action_space.sample())
+            out["steps"] += 1
+            out["terminated"] += int(terminated)
+            if just_dropped and info["solved_this_step"]:
+                out["solve_after_drop"] += 1
+            just_dropped = info["dropped_this_step"]
+            if just_dropped:
+                out["drops"] += 1
+                out["back_in_hand"] += int(info["in_hand"])
+                # shaping is 0 on a drop step (cube not held), so everything
+                # beyond -drop_penalty is the action-rate term, which is tiny
+                out["worst_excess"] = max(out["worst_excess"], abs(reward + env.drop_penalty))
+            if terminated or truncated:
+                break
+    env.close()
+    return out
+
+
 def main() -> None:
     print("\n" + "=" * 68)
     print("STOCK TASK  (orca_sim.OrcaHandRightCubeOrientation)")
@@ -209,6 +241,16 @@ def main() -> None:
     ok &= check
     print(f"    [{'ok' if check else 'FAIL'}] a motionless hand never solves, even at the "
           f"easiest curriculum angle ({free} solves in 30 episodes)")
+
+    rc = reset_cube_drops()
+    check = (rc["drops"] > 0 and rc["terminated"] == 0 and rc["steps"] == 5 * 400
+             and rc["back_in_hand"] == rc["drops"] and rc["worst_excess"] < 0.05
+             and rc["solve_after_drop"] == 0)
+    ok &= check
+    print(f"    [{'ok' if check else 'FAIL'}] drop_mode=reset_cube: {rc['drops']} random-policy drops, "
+          f"0 terminations ({rc['terminated']}), each costs drop_penalty "
+          f"(max deviation {rc['worst_excess']:.4f}), cube back in hand "
+          f"{rc['back_in_hand']}/{rc['drops']}, free solves after a drop {rc['solve_after_drop']}")
 
     # 400 steps of edge-hovering would collect 40 payouts if align_bonus were
     # unbudgeted. Budgeted, it can only ever collect hold_steps per goal, and

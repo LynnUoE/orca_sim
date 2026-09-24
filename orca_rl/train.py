@@ -43,6 +43,7 @@ class TaskMetricsCallback(BaseCallback):
         self._goal_angles: list[float] = []
         self._solve_rates: list[float] = []
         self._goals: list[int] = []
+        self._drop_counts: list[int] = []
         self._goal_solves: list[int] = []
 
     def _on_step(self) -> bool:
@@ -50,7 +51,12 @@ class TaskMetricsCallback(BaseCallback):
             if not done:
                 continue
             self._successes.append(int(info.get("episode_successes", 0)))
-            self._drops.append(float(bool(info.get("dropped", False))))
+            # Episodes with at least one drop. Reading the terminal "dropped"
+            # flag would report 0% under drop_mode="reset_cube", where the cube
+            # is already back in the hand by the time the episode ends.
+            n_drops = int(info.get("episode_drops", int(bool(info.get("dropped", False)))))
+            self._drops.append(float(n_drops > 0))
+            self._drop_counts.append(n_drops)
             self._lengths.append(int(info.get("elapsed_steps", 0)))
             self._goal_angles.append(float(info.get("goal_angle_deg", 0.0)))
             self._solve_rates.append(float(info.get("curriculum_solve_rate", 0.0)))
@@ -61,6 +67,7 @@ class TaskMetricsCallback(BaseCallback):
             self.logger.record("task/solves_per_episode", float(np.mean(self._successes)))
             self.logger.record("task/solved_any_frac", float(np.mean([s > 0 for s in self._successes])))
             self.logger.record("task/drop_rate", float(np.mean(self._drops)))
+            self.logger.record("task/drops_per_episode", float(np.mean(self._drop_counts)))
             self.logger.record("task/episode_length", float(np.mean(self._lengths)))
             self.logger.record("task/goal_angle_deg", float(np.mean(self._goal_angles)))
             self.logger.record("task/curriculum_solve_rate", float(np.mean(self._solve_rates)))
@@ -73,6 +80,7 @@ class TaskMetricsCallback(BaseCallback):
                 float(np.sum(self._goal_solves)) / goals if goals else 0.0,
             )
             self._goals.clear()
+            self._drop_counts.clear()
             self._goal_solves.clear()
             self._successes.clear()
             self._drops.clear()
@@ -224,6 +232,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-episode-steps", type=int, default=400)
     p.add_argument("--randomize-physics", action="store_true")
     p.add_argument("--goal-mode", default="curriculum", choices=["curriculum", "axis", "random"])
+    p.add_argument("--drop-mode", default="terminate", choices=["terminate", "reset_cube"],
+                   help="reset_cube: a drop costs --drop-penalty, the hand and cube go back "
+                        "to the episode's settled start with a new goal, and the episode "
+                        "continues. Under terminate the real price of a drop is the penalty "
+                        "plus the rest of the episode. Evaluation always uses terminate")
     p.add_argument("--goal-timeout", type=int, default=150,
                    help="steps a single goal attempt gets before it is retired unsolved "
                         "and a fresh one is drawn. 0 disables (the old behaviour, where "
@@ -280,6 +293,7 @@ def main() -> None:
         randomize_physics=args.randomize_physics,
         goal_mode=args.goal_mode,
         goal_timeout_steps=args.goal_timeout,
+        drop_mode=args.drop_mode,
         shaping_mode=args.shaping_mode,
         curriculum_start_deg=args.curriculum_start_deg,
         curriculum_step_deg=args.curriculum_step_deg,

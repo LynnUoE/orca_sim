@@ -78,6 +78,7 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         in_hand_height: float = 0.15,
         require_contact: bool = True,
         drop_height: float = 0.10,
+        drop_mode: str = "terminate",  # "terminate" | "reset_cube"
         # --- goals ---
         goal_mode: str = "curriculum",  # "curriculum" | "axis" | "random"
         resample_goal_on_success: bool = True,
@@ -120,6 +121,8 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
             raise ValueError("goal_mode must be 'curriculum', 'axis' or 'random'")
         if action_mode not in {"relative", "absolute"}:
             raise ValueError("action_mode must be 'relative' or 'absolute'")
+        if drop_mode not in {"terminate", "reset_cube"}:
+            raise ValueError("drop_mode must be 'terminate' or 'reset_cube'")
         if shaping_mode not in {"angle", "cos"}:
             raise ValueError("shaping_mode must be 'angle' or 'cos'")
         if curriculum_metric not in {"goal_success", "episode_rate"}:
@@ -154,6 +157,7 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         self.shaping_mode = shaping_mode
         self.shaping_coef = float(shaping_coef)
         self.drop_penalty = float(drop_penalty)
+        self.drop_mode = drop_mode
         self.action_rate_penalty = float(action_rate_penalty)
         self.align_bonus = float(align_bonus)
         self.spin_penalty = float(spin_penalty)
@@ -208,6 +212,8 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         self._align_budget = self.hold_steps
         self._episode_goals = 0
         self._episode_goal_solves = 0
+        self._episode_drops = 0
+        self._settled_state: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
 
         obs = self._get_obs()
         self.observation_space = spaces.Box(
@@ -452,6 +458,7 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
             "goal_age": self._goal_age,
             "episode_goals": self._episode_goals,
             "episode_goal_solves": self._episode_goal_solves,
+            "episode_drops": self._episode_drops,
             "dropped": self._cube_dropped(),
             "elapsed_steps": self._elapsed_steps,
             "goal_angle_deg": self.goal_angle_deg,
@@ -500,6 +507,10 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
 
         obs, _ = super().reset(seed=seed, options=options)
         self._settle_cube()
+        # Where drop_mode="reset_cube" puts the hand and cube back after a drop.
+        self._settled_state = (
+            self.data.qpos.copy(), self.data.qvel.copy(), self.data.ctrl.copy()
+        )
 
         self._goal_dir = self._sample_goal()
         # Continue from the targets the hand actually held while the cube
@@ -514,8 +525,36 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         self._align_budget = self.hold_steps
         self._episode_goals = 0
         self._episode_goal_solves = 0
+        self._episode_drops = 0
 
         return self._get_obs(), self._get_info()
+
+    def _replace_cube(self) -> None:
+        """Put the hand and cube back to this episode's settled start, new goal.
+
+        Used by drop_mode="reset_cube". A drop that ends the episode costs far
+        more than `drop_penalty`: every remaining step of shaping and every
+        solve the episode could still have produced goes with it. The long-1e8
+        notes estimate that at ~-4.7 on top of the explicit -5, and run9/run10
+        answered it the way you would expect -- drop rates of 1-4% while ~60%
+        of goals were never even reached. Continuing after a drop makes the
+        price exactly `drop_penalty`, and lets the policy see what happens
+        after a regrasp instead of the episode simply ending.
+
+        The interrupted goal attempt is not scored for the curriculum -- it did
+        not get its full budget, same rule as an attempt cut off by the episode
+        end.
+        """
+        qpos, qvel, ctrl = self._settled_state
+        self.data.qpos[:] = qpos
+        self.data.qvel[:] = qvel
+        self.data.ctrl[:] = ctrl
+        mujoco.mj_forward(self.model, self.data)
+        self._prev_target = ctrl.astype(np.float64).copy()
+        self._hold_counter = 0
+        self._goal_age = 0
+        self._align_budget = self.hold_steps
+        self._goal_dir = self._sample_goal()
 
     def _settle_cube(self) -> None:
         """Let the cube land before the goal is drawn from its orientation.
@@ -629,15 +668,19 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
 
         if dropped:
             reward -= self.drop_penalty
+            self._episode_drops += 1
+            if self.drop_mode == "reset_cube":
+                self._replace_cube()
 
         # Recompute after any goal change so the next delta is measured
         # against the new goal rather than jumping.
         self._prev_potential = self._potential()
 
-        terminated = bool(dropped)
+        terminated = bool(dropped) and self.drop_mode == "terminate"
         truncated = bool(self._elapsed_steps >= self.max_episode_steps)
 
         info = self._get_info()
+        info["dropped_this_step"] = bool(dropped)
         info["solved_this_step"] = bool(solved)
         info["goal_timed_out"] = bool(timed_out)
         info["shaping"] = float(shaping)
