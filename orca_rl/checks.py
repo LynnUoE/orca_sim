@@ -180,6 +180,40 @@ def reset_cube_drops(episodes: int = 5) -> dict:
     return out
 
 
+def flick_farm(steps: int = 300, **env_kwargs) -> float:
+    """Return of a loop that makes no progress: flick / lift clear / put back.
+
+    Phase 0 spins the resting cube toward the goal while it is held; phase 1
+    lifts it clear of the fingers (out of the hand); phase 2 puts it back at
+    rest. Orientation never actually changes, so honest shaping must net ~0.
+    If the potential is only tracked while the cube is held, whatever it gains
+    on the flick is paid and whatever it loses in the air is never billed.
+    """
+    env = CubeReorientContinuous(**env_kwargs)
+    env.reset(seed=0)
+    qadr, vadr = env._cube_qpos_adr, env._cube_qvel_adr
+    rest = env.data.qpos[qadr:qadr + 7].copy()
+    total = 0.0
+    for t in range(steps):
+        env.data.qpos[qadr:qadr + 7] = rest
+        env.data.qvel[vadr:vadr + 6] = 0.0
+        if t % 3 == 0:
+            normal, goal = env._cube_red_face_world_normal(), env._goal_dir
+            axis = np.cross(normal, goal)
+            axis /= np.linalg.norm(axis) + 1e-12
+            rot = env.data.xmat[env._cube_body_id].reshape(3, 3)
+            env.data.qvel[vadr + 3:vadr + 6] = rot.T @ (5.0 * axis)
+        elif t % 3 == 1:
+            env.data.qpos[qadr + 2] += 0.03
+        mujoco.mj_forward(env.model, env.data)
+        _, reward, terminated, truncated, _ = env.step(np.zeros(env.action_space.shape, dtype=np.float32))
+        total += reward
+        if terminated or truncated:
+            break
+    env.close()
+    return total
+
+
 def main() -> None:
     print("\n" + "=" * 68)
     print("STOCK TASK  (orca_sim.OrcaHandRightCubeOrientation)")
@@ -251,6 +285,18 @@ def main() -> None:
           f"0 terminations ({rc['terminated']}), each costs drop_penalty "
           f"(max deviation {rc['worst_excess']:.4f}), cube back in hand "
           f"{rc['back_in_hand']}/{rc['drops']}, free solves after a drop {rc['solve_after_drop']}")
+
+    farm_open = flick_farm(shaping_mode="lookahead")
+    farm_frozen = flick_farm(shaping_mode="lookahead", freeze_potential_off_hand=True)
+    check = farm_open > 2.0 and abs(farm_frozen) < 0.5
+    ok &= check
+    print(f"    [{'ok' if check else 'FAIL'}] lookahead shaping cannot be farmed by flicking the cube "
+          f"off the fingers when the potential is frozen off-hand ({farm_frozen:+.2f}; "
+          f"{farm_open:+.2f} without the freeze, which is why run13+ must use it)")
+    farm_default = flick_farm()
+    print(f"    [{'warn' if farm_default > 0.5 else 'ok'}] default angle shaping, same loop: "
+          f"{farm_default:+.2f} per 300 steps -- a latent hole in the run9-run12 config "
+          f"(unused by those policies: 95-100% in-hand); --freeze-potential-off-hand closes it")
 
     # 400 steps of edge-hovering would collect 40 payouts if align_bonus were
     # unbudgeted. Budgeted, it can only ever collect hold_steps per goal, and

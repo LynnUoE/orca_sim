@@ -241,9 +241,17 @@ def parse_args() -> argparse.Namespace:
                    help="steps a single goal attempt gets before it is retired unsolved "
                         "and a fresh one is drawn. 0 disables (the old behaviour, where "
                         "one unreachable goal burned the rest of the episode)")
-    p.add_argument("--shaping-mode", default="angle", choices=["angle", "cos"],
+    p.add_argument("--shaping-mode", default="angle", choices=["angle", "cos", "lookahead"],
                    help="'cos' is the original potential and its gradient vanishes at "
                         "the goal; 'angle' pays the same per degree everywhere")
+    p.add_argument("--lookahead-s", type=float, default=0.15,
+                   help="lookahead shaping: how far ahead (s) the cube's spin is extrapolated")
+    p.add_argument("--lookahead-mix", type=float, default=0.5,
+                   help="lookahead shaping: weight on the predicted angle vs the current one")
+    p.add_argument("--freeze-potential-off-hand", action="store_true",
+                   help="bill potential changes that happen while the cube is out of the hand "
+                        "on the step it is regrasped. Required with --shaping-mode lookahead: "
+                        "without it checks.py farms +4.8 per 300 steps by flicking the cube")
     p.add_argument("--curriculum-metric", default="goal_success",
                    choices=["goal_success", "episode_rate"])
     p.add_argument("--curriculum-window", type=int, default=40,
@@ -295,6 +303,9 @@ def main() -> None:
         goal_timeout_steps=args.goal_timeout,
         drop_mode=args.drop_mode,
         shaping_mode=args.shaping_mode,
+        lookahead_s=args.lookahead_s,
+        lookahead_mix=args.lookahead_mix,
+        freeze_potential_off_hand=args.freeze_potential_off_hand,
         curriculum_start_deg=args.curriculum_start_deg,
         curriculum_step_deg=args.curriculum_step_deg,
         curriculum_metric=args.curriculum_metric,

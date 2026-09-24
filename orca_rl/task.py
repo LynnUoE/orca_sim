@@ -99,7 +99,10 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         obs_include_target: bool = True,
         # --- reward weights ---
         success_bonus: float = 10.0,
-        shaping_mode: str = "angle",  # "angle" | "cos"
+        shaping_mode: str = "angle",  # "angle" | "cos" | "lookahead"
+        lookahead_s: float = 0.15,
+        lookahead_mix: float = 0.5,
+        freeze_potential_off_hand: bool = False,
         shaping_coef: float = 1.0,
         drop_penalty: float = 5.0,
         action_rate_penalty: float = 0.002,
@@ -123,8 +126,8 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
             raise ValueError("action_mode must be 'relative' or 'absolute'")
         if drop_mode not in {"terminate", "reset_cube"}:
             raise ValueError("drop_mode must be 'terminate' or 'reset_cube'")
-        if shaping_mode not in {"angle", "cos"}:
-            raise ValueError("shaping_mode must be 'angle' or 'cos'")
+        if shaping_mode not in {"angle", "cos", "lookahead"}:
+            raise ValueError("shaping_mode must be 'angle', 'cos' or 'lookahead'")
         if curriculum_metric not in {"goal_success", "episode_rate"}:
             raise ValueError("curriculum_metric must be 'goal_success' or 'episode_rate'")
 
@@ -155,6 +158,9 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         self.action_scale = float(action_scale)
         self.success_bonus = float(success_bonus)
         self.shaping_mode = shaping_mode
+        self.lookahead_s = float(lookahead_s)
+        self.lookahead_mix = float(lookahead_mix)
+        self.freeze_potential_off_hand = bool(freeze_potential_off_hand)
         self.shaping_coef = float(shaping_coef)
         self.drop_penalty = float(drop_penalty)
         self.drop_mode = drop_mode
@@ -381,7 +387,46 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         """
         if self.shaping_mode == "cos":
             return self._alignment()
+        if self.shaping_mode == "lookahead":
+            mix = self.lookahead_mix
+            return -((1.0 - mix) * self._goal_angle_rad() + mix * self._lookahead_angle_rad()) / np.pi
         return -self._goal_angle_rad() / np.pi
+
+    def _cube_angvel_world(self) -> np.ndarray:
+        # A free joint's rotational qvel is in the body frame (checked against a
+        # finite difference of the red-face normal); rotate it into the world.
+        rot = self.data.xmat[self._cube_body_id].reshape(3, 3)
+        return rot @ self._cube_qvel()[3:]
+
+    def _lookahead_angle_rad(self) -> float:
+        """Angle to the goal where the red face will point in `lookahead_s`.
+
+        Extrapolates the cube's current spin. This is what lets the potential
+        reward braking without taxing speed: far from the goal, turning toward
+        it fast brings the predicted angle *down* (paid), while near the goal a
+        cube still spinning hard is predicted to sail past, so its predicted
+        angle goes back *up* -- and slowing down is what recovers it.
+
+        run9's spin_penalty charged every in-cone step for angular speed. It
+        raised conversion (68% vs 44%) but the cheapest way to avoid it was to
+        arrive slowly or not at all, and cone entries fell 44% -> 33%. Since
+        this is a potential, it cannot change which policy is optimal -- it only
+        moves the braking signal to the moment braking happens.
+        """
+        normal = self._cube_red_face_world_normal()
+        omega = self._cube_angvel_world()
+        speed = float(np.linalg.norm(omega))
+        turn = min(speed * self.lookahead_s, np.pi)
+        if turn < 1e-6:
+            return self._goal_angle_rad()
+        axis = omega / speed
+        predicted = (
+            normal * np.cos(turn)
+            + np.cross(axis, normal) * np.sin(turn)
+            + axis * np.dot(axis, normal) * (1.0 - np.cos(turn))
+        )
+        predicted /= np.linalg.norm(predicted) + 1e-12
+        return float(np.arccos(np.clip(np.dot(predicted, self._goal_dir), -1.0, 1.0)))
 
     # ------------------------------------------------------------- in-hand-ness
 
@@ -588,6 +633,7 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
     def step(
         self, action: np.ndarray
     ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        goal_before = self._goal_dir
         target = self._target_from_action(action)
 
         rate = (target - self._prev_target) / np.maximum(self._ctrl_halfspan, 1e-8)
@@ -674,7 +720,17 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
 
         # Recompute after any goal change so the next delta is measured
         # against the new goal rather than jumping.
-        self._prev_potential = self._potential()
+        #
+        # With freeze_potential_off_hand the potential is NOT tracked while the
+        # cube is out of the hand: the step that re-establishes the grasp is
+        # charged for everything that changed in between. Otherwise shaping only
+        # telescopes over in-hand stretches, and whatever the potential loses
+        # while the cube is loose is simply never billed -- flick it toward the
+        # goal (paid), let it hop off the fingers and fall back (unbilled),
+        # repeat. checks.py demonstrates that loop with a scripted policy.
+        goal_changed = self._goal_dir is not goal_before
+        if not self.freeze_potential_off_hand or in_hand or goal_changed:
+            self._prev_potential = self._potential()
 
         terminated = bool(dropped) and self.drop_mode == "terminate"
         truncated = bool(self._elapsed_steps >= self.max_episode_steps)
