@@ -106,8 +106,8 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         shaping_coef: float = 1.0,
         drop_penalty: float = 5.0,
         action_rate_penalty: float = 0.002,
-        # Both off by default: run9 vs run10 (README 复盘六) -- they buy
-        # conversion (68% vs 44%) at a larger cost in reach (33% vs 44%).
+        # Both off by default: run9 (with them) finished below run10 and run12
+        # (two seeds without them) at 30, 45 and 60 degrees. README 复盘六/七.
         align_bonus: float = 0.0,
         spin_penalty: float = 0.0,
         spin_band: float = 1.0,
@@ -407,11 +407,13 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         cube still spinning hard is predicted to sail past, so its predicted
         angle goes back *up* -- and slowing down is what recovers it.
 
-        run9's spin_penalty charged every in-cone step for angular speed. It
-        raised conversion (68% vs 44%) but the cheapest way to avoid it was to
-        arrive slowly or not at all, and cone entries fell 44% -> 33%. Since
-        this is a potential, it cannot change which policy is optimal -- it only
-        moves the braking signal to the moment braking happens.
+        run9's spin_penalty charged every in-cone step for angular speed, which
+        can be dodged by arriving slowly. Since this is a potential, it cannot
+        change which policy is optimal -- it only moves the braking signal to
+        the moment braking happens.
+
+        Measured (run13, one seed): it did not help. 43/35/18% at 30/45/60 deg
+        against 49-53/37-39/25-28% for the baseline's two seeds. README 复盘七.
         """
         normal = self._cube_red_face_world_normal()
         omega = self._cube_angvel_world()

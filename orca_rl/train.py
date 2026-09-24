@@ -269,9 +269,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--success-tolerance-deg", type=float, default=15.0)
     p.add_argument("--spin-penalty", type=float, default=0.0,
                    help="penalise cube angular speed inside the goal cone. Off by default: "
-                        "in run9 (0.05, with --align-bonus 0.1) it raised hold conversion "
-                        "68%% vs 44%% but cut cone entries 33%% vs 44%%, and entries are "
-                        "the bottleneck -- run10 without both was better at 30/45/60 deg")
+                        "run9 (0.05, with --align-bonus 0.1) finished below both seeds of "
+                        "the baseline without them (run10/run12) at 30, 45 and 60 deg")
     p.add_argument("--spin-band", type=float, default=1.0,
                    help="width of that band, in multiples of the success tolerance. "
                         "Keep it <= 1: at 2.0 the band swallows the whole 30-degree "
