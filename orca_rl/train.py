@@ -11,6 +11,7 @@ Everything lands in ``runs/<name>/``: checkpoints, the VecNormalize statistics
 from __future__ import annotations
 
 import argparse
+import json
 import signal
 from pathlib import Path
 
@@ -24,7 +25,12 @@ from stable_baselines3.common.vec_env import (
     VecNormalize,
 )
 
-from orca_rl.task import LEGACY_OBS_DIM, CubeReorientContinuous, resolve_stats_path
+from orca_rl.task import (
+    ENV_KWARGS_FILE,
+    LEGACY_OBS_DIM,
+    CubeReorientContinuous,
+    resolve_stats_path,
+)
 
 
 class TaskMetricsCallback(BaseCallback):
@@ -320,6 +326,7 @@ def main() -> None:
 
     resume_path = Path(args.resume) if args.resume else None
     stats_path = resolve_stats_path(resume_path) if resume_path else None
+    (run_dir / ENV_KWARGS_FILE).write_text(json.dumps(env_kwargs, indent=2, default=float))
     if resume_path is not None and resume_path.exists():
         # Checkpoints from before the controller target joined the observation
         # (runs 1-8, 54-dim) can still be resumed, in their own layout.

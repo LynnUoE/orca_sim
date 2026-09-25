@@ -29,6 +29,7 @@ next step toward sim-to-real.
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -758,6 +759,37 @@ LEGACY_OBS_DIM = 54  # runs 1-8: no controller target in the observation
 def obs_kwargs_for_model(model: Any) -> dict[str, Any]:
     """Env kwargs that reproduce the observation a saved policy was trained on."""
     return {"obs_include_target": int(model.observation_space.shape[0]) != LEGACY_OBS_DIM}
+
+
+# Env settings that change what an action *means*. A policy evaluated with a
+# different value is driving a different robot: run14 (action_scale 0.06) run
+# through the old evaluate.py would have had every step scaled up 2.5x.
+POLICY_ENV_KEYS = ("action_mode", "action_scale")
+ENV_KWARGS_FILE = "env_kwargs.json"
+
+
+def policy_env_kwargs(model: Any, model_path: str | Path, **overrides: Any) -> dict[str, Any]:
+    """Env kwargs that reproduce the robot a saved policy was trained on.
+
+    Observation layout comes from the model itself; action settings come from
+    the `env_kwargs.json` train.py writes into the run directory (found next to
+    `final_model.zip` or one level above `checkpoints/`). Explicit overrides
+    that are not None win. Runs trained before the file existed (run1-run13)
+    all used the defaults, which is what an empty result falls back to.
+    """
+    kwargs = obs_kwargs_for_model(model)
+    path = Path(model_path)
+    for run_dir in (path.parent, path.parent.parent):
+        saved_file = run_dir / ENV_KWARGS_FILE
+        if saved_file.exists():
+            saved = json.loads(saved_file.read_text())
+            kwargs.update({k: saved[k] for k in POLICY_ENV_KEYS if k in saved})
+            break
+    else:
+        print(f"note: no {ENV_KWARGS_FILE} for {path} -- assuming the default action "
+              "settings (relative, action_scale 0.15); pass --action-scale if not")
+    kwargs.update({k: v for k, v in overrides.items() if v is not None})
+    return kwargs
 
 
 def resolve_stats_path(model_path: Path) -> Path:

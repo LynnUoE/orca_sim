@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-from orca_rl.task import CubeReorientContinuous, obs_kwargs_for_model, resolve_stats_path
+from orca_rl.task import CubeReorientContinuous, policy_env_kwargs, resolve_stats_path
 
 
 def build_actor(args):
@@ -37,7 +37,7 @@ def build_actor(args):
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
     model = PPO.load(args.model, device="cpu")
-    obs_kw = obs_kwargs_for_model(model)
+    obs_kw = policy_env_kwargs(model, args.model, action_scale=args.action_scale)
     stats = Path(args.vecnormalize) if args.vecnormalize else resolve_stats_path(Path(args.model))
     normalizer = None
     if stats.exists():
@@ -59,6 +59,9 @@ def build_actor(args):
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--action-scale", type=float, default=None,
+                   help="override the action scale the model was trained with (read from "
+                        "the run's env_kwargs.json; 0.15 for runs without one)")
     p.add_argument("--model", default=None)
     p.add_argument("--vecnormalize", default=None)
     p.add_argument("--policy", default="model", choices=["model", "random", "zero"])

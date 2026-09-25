@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from orca_rl.task import CubeReorientContinuous, obs_kwargs_for_model, resolve_stats_path
+from orca_rl.task import CubeReorientContinuous, policy_env_kwargs, resolve_stats_path
 
 
 def load_policy(args):
@@ -39,7 +39,8 @@ def load_policy(args):
     if args.vecnormalize:
         stats = Path(args.vecnormalize)
         if stats.exists():
-            dummy = DummyVecEnv([lambda: CubeReorientContinuous(**obs_kwargs_for_model(model))])
+            dummy = DummyVecEnv([lambda: CubeReorientContinuous(**policy_env_kwargs(
+                model, args.model, action_mode=args.action_mode, action_scale=args.action_scale))])
             normalizer = VecNormalize.load(str(stats), dummy)
             normalizer.training = False
             normalizer.norm_reward = False
@@ -77,7 +78,11 @@ def main() -> None:
                         "this matches -- solves/episode depends on how many attempts fit")
     p.add_argument("--hold-steps", type=int, default=10,
                    help="evaluate at the standard bar (10) even if training used a\n                         looser one, so numbers stay comparable across runs")
-    p.add_argument("--action-mode", default="relative", choices=["relative", "absolute"])
+    p.add_argument("--action-mode", default=None, choices=["relative", "absolute"],
+                   help="override the action mode the model was trained with")
+    p.add_argument("--action-scale", type=float, default=None,
+                   help="override the action scale the model was trained with (read from "
+                        "the run's env_kwargs.json; 0.15 for runs without one)")
     args = p.parse_args()
 
     if args.policy == "model" and args.model is None:
@@ -94,12 +99,12 @@ def main() -> None:
 
     env_kwargs = dict(
         max_episode_steps=args.max_episode_steps,
-        action_mode=args.action_mode,
         randomize_physics=args.randomize_physics,
         hold_steps=args.hold_steps,
     )
     if model is not None:
-        env_kwargs.update(obs_kwargs_for_model(model))
+        env_kwargs.update(policy_env_kwargs(
+            model, args.model, action_mode=args.action_mode, action_scale=args.action_scale))
     if args.goal_timeout is not None:
         env_kwargs["goal_timeout_steps"] = args.goal_timeout
     env = CubeReorientContinuous(**env_kwargs)
