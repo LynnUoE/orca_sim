@@ -98,6 +98,7 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         action_mode: str = "relative",  # "relative" | "absolute"
         action_scale: float = 0.15,
         obs_include_target: bool = True,
+        obs_include_rotvec: bool = False,
         # --- reward weights ---
         success_bonus: float = 10.0,
         shaping_mode: str = "angle",  # "angle" | "cos" | "lookahead"
@@ -136,6 +137,7 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         self._goal_dir = AXIS_GOALS[0].copy()
         self._obs_noise_rad = 0.0
         self.obs_include_target = bool(obs_include_target)
+        self.obs_include_rotvec = bool(obs_include_rotvec)
 
         self.hold_steps = int(hold_steps)
         self.reset_settle_steps = int(reset_settle_steps)
@@ -487,7 +489,35 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         # targets were. Without this the task is not Markov in the action.
         if self.obs_include_target and hasattr(self, "_ctrl_center"):
             parts.append((self._prev_target - self._ctrl_center) / self._ctrl_halfspan)
+        if self.obs_include_rotvec:
+            parts.append(self._goal_rotvec())
         return np.concatenate(parts)
+
+    def _goal_rotvec(self) -> np.ndarray:
+        """The rotation that takes the red face onto the goal, as axis * angle.
+
+        Both vectors were already in the observation, but "which way to turn and
+        how far" is a cross product and an arccos of them -- bilinear and
+        non-monotone work for a 256x256 MLP fed normalized inputs, and exactly
+        the quantity a policy that fails on REACH (~60% of 45-degree goals never
+        entered) would need. Given as a rotation vector rather than a unit axis
+        plus an angle, so it shrinks smoothly to zero at the goal instead of the
+        axis swinging wildly as the red face crosses it. World frame, which is
+        the hand's frame too: the hand does not move.
+        """
+        normal = self._cube_red_face_world_normal()
+        cross = np.cross(normal, self._goal_dir)
+        sin = float(np.linalg.norm(cross))
+        angle = float(np.arctan2(sin, float(np.dot(normal, self._goal_dir))))
+        if sin < 1e-8:
+            if angle < 1e-6:
+                return np.zeros(3)
+            # Exactly opposite: every perpendicular axis works; pick one.
+            axis = np.cross(normal, [1.0, 0.0, 0.0])
+            if np.linalg.norm(axis) < 1e-6:
+                axis = np.cross(normal, [0.0, 1.0, 0.0])
+            return angle * axis / np.linalg.norm(axis)
+        return angle * cross / sin
 
     def _get_info(self) -> dict[str, Any]:
         return {
@@ -756,9 +786,28 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
 LEGACY_OBS_DIM = 54  # runs 1-8: no controller target in the observation
 
 
+TARGET_OBS_DIMS = 17   # servo targets, runs 9+
+ROTVEC_OBS_DIMS = 3    # goal rotation vector, runs 18+
+
+
+def obs_kwargs_for_dim(obs_dim: int) -> dict[str, Any]:
+    """Observation flags that produce an `obs_dim`-wide observation."""
+    extra = int(obs_dim) - LEGACY_OBS_DIM
+    layouts = {
+        0: (False, False),
+        TARGET_OBS_DIMS: (True, False),
+        ROTVEC_OBS_DIMS: (False, True),
+        TARGET_OBS_DIMS + ROTVEC_OBS_DIMS: (True, True),
+    }
+    if extra not in layouts:
+        raise ValueError(f"no known observation layout is {obs_dim} wide")
+    target, rotvec = layouts[extra]
+    return {"obs_include_target": target, "obs_include_rotvec": rotvec}
+
+
 def obs_kwargs_for_model(model: Any) -> dict[str, Any]:
     """Env kwargs that reproduce the observation a saved policy was trained on."""
-    return {"obs_include_target": int(model.observation_space.shape[0]) != LEGACY_OBS_DIM}
+    return obs_kwargs_for_dim(int(model.observation_space.shape[0]))
 
 
 # Env settings that change what an action *means*. A policy evaluated with a

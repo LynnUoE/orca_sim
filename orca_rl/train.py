@@ -29,6 +29,7 @@ from orca_rl.task import (
     ENV_KWARGS_FILE,
     LEGACY_OBS_DIM,
     CubeReorientContinuous,
+    obs_kwargs_for_dim,
     resolve_stats_path,
 )
 
@@ -258,6 +259,9 @@ def parse_args() -> argparse.Namespace:
                    help="bill potential changes that happen while the cube is out of the hand "
                         "on the step it is regrasped. Required with --shaping-mode lookahead: "
                         "without it checks.py farms +4.8 per 300 steps by flicking the cube")
+    p.add_argument("--obs-rotvec", action="store_true",
+                   help="append the goal rotation vector (axis * remaining angle, 3 dims) to "
+                        "the observation: which way to turn the red face, and how far")
     p.add_argument("--curriculum-metric", default="goal_success",
                    choices=["goal_success", "episode_rate"])
     p.add_argument("--curriculum-window", type=int, default=40,
@@ -308,6 +312,7 @@ def main() -> None:
         goal_timeout_steps=args.goal_timeout,
         drop_mode=args.drop_mode,
         shaping_mode=args.shaping_mode,
+        obs_include_rotvec=args.obs_rotvec,
         lookahead_s=args.lookahead_s,
         lookahead_mix=args.lookahead_mix,
         freeze_potential_off_hand=args.freeze_potential_off_hand,
@@ -328,12 +333,13 @@ def main() -> None:
     stats_path = resolve_stats_path(resume_path) if resume_path else None
     (run_dir / ENV_KWARGS_FILE).write_text(json.dumps(env_kwargs, indent=2, default=float))
     if resume_path is not None and resume_path.exists():
-        # Checkpoints from before the controller target joined the observation
-        # (runs 1-8, 54-dim) can still be resumed, in their own layout.
+        # Resume in whatever observation layout the checkpoint was trained on
+        # (54-dim runs 1-8, 71-dim runs 9-17, 74-dim with the goal rotvec).
         from stable_baselines3.common.save_util import load_from_zip_file
         saved, _, _ = load_from_zip_file(str(resume_path), load_data=True, device="cpu")
-        if int(saved["observation_space"].shape[0]) == LEGACY_OBS_DIM:
-            env_kwargs["obs_include_target"] = False
+        saved_dim = int(saved["observation_space"].shape[0])
+        env_kwargs.update(obs_kwargs_for_dim(saved_dim))
+        if saved_dim == LEGACY_OBS_DIM:
             print("resuming a legacy 54-dim policy: controller target NOT observed. "
                   "Start fresh to get the fixed observation.")
 
