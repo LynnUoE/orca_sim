@@ -99,6 +99,7 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         action_scale: float = 0.15,
         obs_include_target: bool = True,
         obs_include_rotvec: bool = False,
+        obs_include_fingertips: bool = False,
         # --- reward weights ---
         success_bonus: float = 10.0,
         shaping_mode: str = "angle",  # "angle" | "cos" | "lookahead"
@@ -138,6 +139,7 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         self._obs_noise_rad = 0.0
         self.obs_include_target = bool(obs_include_target)
         self.obs_include_rotvec = bool(obs_include_rotvec)
+        self.obs_include_fingertips = bool(obs_include_fingertips)
 
         self.hold_steps = int(hold_steps)
         self.reset_settle_steps = int(reset_settle_steps)
@@ -203,6 +205,7 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
             self.model.geom("task_cube_body").id,
             self.model.geom("task_cube_red_face").id,
         }
+        self._setup_fingers()
 
         # Nominal physics, kept so randomization always perturbs around the same base.
         self._nominal = {
@@ -491,7 +494,76 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
             parts.append((self._prev_target - self._ctrl_center) / self._ctrl_halfspan)
         if self.obs_include_rotvec:
             parts.append(self._goal_rotvec())
+        if self.obs_include_fingertips and hasattr(self, "_tip_geom_ids"):
+            parts.append(self._fingertip_features())
         return np.concatenate(parts)
+
+    def _setup_fingers(self) -> None:
+        """Find each finger's links and its distal collision geom.
+
+        The hand's five leaf bodies are the distal phalanges (thumb, index,
+        middle, ring, pinky -- ring reuses the middle finger's part names, so
+        names cannot be trusted and ids are used). A finger is everything from
+        its leaf back up to, but not including, the carpals every finger hangs
+        off. The distal geoms are unnamed, so the collision one is the one that
+        can actually collide.
+        """
+        m = self.model
+        parents = {int(m.body_parentid[b]) for b in range(m.nbody)}
+        leaves = [b for b in range(1, m.nbody)
+                  if b not in parents and b != self._cube_body_id]
+        # The carpals: the deepest body that every fingertip descends from.
+        def chain(body: int) -> list[int]:
+            out = []
+            while body != 0:
+                out.append(body)
+                body = int(m.body_parentid[body])
+            return out
+        common = set(chain(leaves[0]))
+        for leaf in leaves[1:]:
+            common &= set(chain(leaf))
+        self._finger_body_sets: list[set[int]] = []
+        self._tip_geom_ids: list[int] = []
+        for leaf in leaves:
+            self._finger_body_sets.append({b for b in chain(leaf) if b not in common})
+            colliding = [g for g in range(m.ngeom) if int(m.geom_bodyid[g]) == leaf
+                         and (int(m.geom_contype[g]) or int(m.geom_conaffinity[g]))]
+            if len(colliding) != 1:
+                raise RuntimeError(f"expected one collision geom on {m.body(leaf).name}, "
+                                   f"found {len(colliding)}")
+            self._tip_geom_ids.append(colliding[0])
+
+    def _fingertip_features(self) -> np.ndarray:
+        """Each fingertip's position relative to the cube, then per-finger contact.
+
+        15 + 5 values. Positions are the distal collision geoms' centres minus
+        the cube centre, in the world frame (the hand's frame: it is fixed).
+        A finger counts as touching when any of its links touches the cube --
+        a push with the middle phalanx is how a lot of rolling gets done.
+
+        Before this the policy saw joint angles and the cube pose and had to
+        infer, through the whole kinematic chain, where its fingers were
+        relative to the cube and which of them were in contact. The idea is
+        borrowed from the teammate taskgen environments (fingertip deltas and
+        contact flags); Dactyl-style in-hand policies observe fingertips too.
+        """
+        cube = self.data.xpos[self._cube_body_id]
+        tips = np.concatenate([self.data.geom_xpos[g] - cube for g in self._tip_geom_ids])
+        touching = np.zeros(len(self._finger_body_sets))
+        for i in range(self.data.ncon):
+            contact = self.data.contact[i]
+            g1, g2 = int(contact.geom1), int(contact.geom2)
+            if g1 in self._cube_geom_ids:
+                other = g2
+            elif g2 in self._cube_geom_ids:
+                other = g1
+            else:
+                continue
+            body = int(self.model.geom_bodyid[other])
+            for k, bodies in enumerate(self._finger_body_sets):
+                if body in bodies:
+                    touching[k] = 1.0
+        return np.concatenate([tips, touching])
 
     def _goal_rotvec(self) -> np.ndarray:
         """The rotation that takes the red face onto the goal, as axis * angle.
@@ -788,6 +860,15 @@ LEGACY_OBS_DIM = 54  # runs 1-8: no controller target in the observation
 
 TARGET_OBS_DIMS = 17   # servo targets, runs 9+
 ROTVEC_OBS_DIMS = 3    # goal rotation vector, runs 18+
+FINGERTIP_OBS_DIMS = 20  # 5 fingertip offsets + 5 contact flags, runs 20+
+OBS_FLAG_KEYS = ("obs_include_target", "obs_include_rotvec", "obs_include_fingertips")
+
+
+def obs_dim_for(obs_include_target: bool = True, obs_include_rotvec: bool = False,
+                obs_include_fingertips: bool = False) -> int:
+    return (LEGACY_OBS_DIM + TARGET_OBS_DIMS * bool(obs_include_target)
+            + ROTVEC_OBS_DIMS * bool(obs_include_rotvec)
+            + FINGERTIP_OBS_DIMS * bool(obs_include_fingertips))
 
 
 def obs_kwargs_for_dim(obs_dim: int) -> dict[str, Any]:
@@ -800,9 +881,40 @@ def obs_kwargs_for_dim(obs_dim: int) -> dict[str, Any]:
         TARGET_OBS_DIMS + ROTVEC_OBS_DIMS: (True, True),
     }
     if extra not in layouts:
-        raise ValueError(f"no known observation layout is {obs_dim} wide")
+        raise ValueError(f"no known observation layout is {obs_dim} wide "
+                         "(fingertip layouts are only recoverable from env_kwargs.json)")
     target, rotvec = layouts[extra]
-    return {"obs_include_target": target, "obs_include_rotvec": rotvec}
+    return {"obs_include_target": target, "obs_include_rotvec": rotvec,
+            "obs_include_fingertips": False}
+
+
+def saved_env_kwargs(model_path: str | Path) -> dict[str, Any] | None:
+    """The env_kwargs.json train.py wrote for the run this model belongs to."""
+    path = Path(model_path)
+    for run_dir in (path.parent, path.parent.parent):
+        saved_file = run_dir / ENV_KWARGS_FILE
+        if saved_file.exists():
+            return json.loads(saved_file.read_text())
+    return None
+
+
+def obs_kwargs_for_run(model_path: str | Path, obs_dim: int) -> dict[str, Any]:
+    """Observation flags for a saved model: from its run's env_kwargs.json.
+
+    Width alone cannot tell a 20-wide fingertip block from target + rotvec
+    (17 + 3), so the saved flags win, checked against the width. Runs that
+    predate the file never used fingertips, so width inference is exact there.
+    """
+    saved = saved_env_kwargs(model_path) or {}
+    if any(k in saved for k in OBS_FLAG_KEYS):
+        flags = {"obs_include_target": saved.get("obs_include_target", True),
+                 "obs_include_rotvec": saved.get("obs_include_rotvec", False),
+                 "obs_include_fingertips": saved.get("obs_include_fingertips", False)}
+        if obs_dim_for(**flags) != int(obs_dim):
+            raise ValueError(f"{model_path}: env_kwargs.json says {flags} "
+                             f"({obs_dim_for(**flags)} dims) but the model takes {obs_dim}")
+        return flags
+    return obs_kwargs_for_dim(obs_dim)
 
 
 def obs_kwargs_for_model(model: Any) -> dict[str, Any]:
@@ -826,14 +938,11 @@ def policy_env_kwargs(model: Any, model_path: str | Path, **overrides: Any) -> d
     that are not None win. Runs trained before the file existed (run1-run13)
     all used the defaults, which is what an empty result falls back to.
     """
-    kwargs = obs_kwargs_for_model(model)
     path = Path(model_path)
-    for run_dir in (path.parent, path.parent.parent):
-        saved_file = run_dir / ENV_KWARGS_FILE
-        if saved_file.exists():
-            saved = json.loads(saved_file.read_text())
-            kwargs.update({k: saved[k] for k in POLICY_ENV_KEYS if k in saved})
-            break
+    kwargs = obs_kwargs_for_run(path, int(model.observation_space.shape[0]))
+    saved = saved_env_kwargs(path)
+    if saved is not None:
+        kwargs.update({k: saved[k] for k in POLICY_ENV_KEYS if k in saved})
     else:
         print(f"note: no {ENV_KWARGS_FILE} for {path} -- assuming the default action "
               "settings (relative, action_scale 0.15); pass --action-scale if not")

@@ -29,7 +29,7 @@ from orca_rl.task import (
     ENV_KWARGS_FILE,
     LEGACY_OBS_DIM,
     CubeReorientContinuous,
-    obs_kwargs_for_dim,
+    obs_kwargs_for_run,
     resolve_stats_path,
 )
 
@@ -262,6 +262,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--obs-rotvec", action="store_true",
                    help="append the goal rotation vector (axis * remaining angle, 3 dims) to "
                         "the observation: which way to turn the red face, and how far")
+    p.add_argument("--obs-fingertips", action="store_true",
+                   help="append each fingertip's position relative to the cube (15) and "
+                        "per-finger cube contact flags (5) to the observation")
     p.add_argument("--curriculum-metric", default="goal_success",
                    choices=["goal_success", "episode_rate"])
     p.add_argument("--curriculum-window", type=int, default=40,
@@ -313,6 +316,7 @@ def main() -> None:
         drop_mode=args.drop_mode,
         shaping_mode=args.shaping_mode,
         obs_include_rotvec=args.obs_rotvec,
+        obs_include_fingertips=args.obs_fingertips,
         lookahead_s=args.lookahead_s,
         lookahead_mix=args.lookahead_mix,
         freeze_potential_off_hand=args.freeze_potential_off_hand,
@@ -338,7 +342,7 @@ def main() -> None:
         from stable_baselines3.common.save_util import load_from_zip_file
         saved, _, _ = load_from_zip_file(str(resume_path), load_data=True, device="cpu")
         saved_dim = int(saved["observation_space"].shape[0])
-        env_kwargs.update(obs_kwargs_for_dim(saved_dim))
+        env_kwargs.update(obs_kwargs_for_run(resume_path, saved_dim))
         if saved_dim == LEGACY_OBS_DIM:
             print("resuming a legacy 54-dim policy: controller target NOT observed. "
                   "Start fresh to get the fixed observation.")
