@@ -234,6 +234,11 @@ def parse_args() -> argparse.Namespace:
                    help="initial action std = exp(this). SB3 default 0 (std=1) saturates this action space")
 
     # task
+    p.add_argument("--version", default="v2", choices=["v1", "v2"],
+                   help="ORCA hand version. The actuator order and joint ranges differ "
+                        "(v1: wrist, thumb x4, index, middle, ring, pinky; v2: wrist, "
+                        "pinky, ring, middle, index, thumb), so a policy only runs on the "
+                        "hand it was trained on")
     p.add_argument("--action-mode", default="relative", choices=["relative", "absolute"])
     p.add_argument("--action-scale", type=float, default=0.15)
     p.add_argument("--max-episode-steps", type=int, default=400)
@@ -307,6 +312,7 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     env_kwargs = dict(
+        version=args.version,
         action_mode=args.action_mode,
         action_scale=args.action_scale,
         max_episode_steps=args.max_episode_steps,

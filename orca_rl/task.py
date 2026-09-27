@@ -506,7 +506,7 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
         names cannot be trusted and ids are used). A finger is everything from
         its leaf back up to, but not including, the carpals every finger hangs
         off. The distal geoms are unnamed, so the collision one is the one that
-        can actually collide.
+        can actually collide (the outermost, when v1's skin pad adds a second).
         """
         m = self.model
         parents = {int(m.body_parentid[b]) for b in range(m.nbody)}
@@ -528,10 +528,13 @@ class CubeReorientContinuous(OrcaHandRightCubeOrientation):
             self._finger_body_sets.append({b for b in chain(leaf) if b not in common})
             colliding = [g for g in range(m.ngeom) if int(m.geom_bodyid[g]) == leaf
                          and (int(m.geom_contype[g]) or int(m.geom_conaffinity[g]))]
-            if len(colliding) != 1:
-                raise RuntimeError(f"expected one collision geom on {m.body(leaf).name}, "
-                                   f"found {len(colliding)}")
-            self._tip_geom_ids.append(colliding[0])
+            if not colliding:
+                raise RuntimeError(f"no collision geom on {m.body(leaf).name}")
+            # v2 has one collision mesh per distal link; v1 has two (the link and
+            # a skin pad further out). The one furthest from the joint is the tip.
+            self._tip_geom_ids.append(
+                max(colliding, key=lambda g: float(np.linalg.norm(m.geom_pos[g])))
+            )
 
     def _fingertip_features(self) -> np.ndarray:
         """Each fingertip's position relative to the cube, then per-finger contact.
@@ -925,7 +928,7 @@ def obs_kwargs_for_model(model: Any) -> dict[str, Any]:
 # Env settings that change what an action *means*. A policy evaluated with a
 # different value is driving a different robot: run14 (action_scale 0.06) run
 # through the old evaluate.py would have had every step scaled up 2.5x.
-POLICY_ENV_KEYS = ("action_mode", "action_scale")
+POLICY_ENV_KEYS = ("action_mode", "action_scale", "version")
 ENV_KWARGS_FILE = "env_kwargs.json"
 
 
@@ -944,8 +947,11 @@ def policy_env_kwargs(model: Any, model_path: str | Path, **overrides: Any) -> d
     if saved is not None:
         kwargs.update({k: saved[k] for k in POLICY_ENV_KEYS if k in saved})
     else:
-        print(f"note: no {ENV_KWARGS_FILE} for {path} -- assuming the default action "
-              "settings (relative, action_scale 0.15); pass --action-scale if not")
+        print(f"note: no {ENV_KWARGS_FILE} for {path} -- assuming the defaults it was "
+              "trained with (v2 hand, relative, action_scale 0.15); pass --action-scale if not")
+    # Runs before --version existed were all v2; the actuator order differs
+    # between hands, so a v1 policy on a v2 hand drives the wrong joints.
+    kwargs.setdefault("version", "v2")
     kwargs.update({k: v for k, v in overrides.items() if v is not None})
     return kwargs
 
