@@ -1,0 +1,58 @@
+# The Mac environment used for the safety-layer evaluations and train.py --safety, exported 2026-10-13.
+# macOS 15 (Apple M4), Python 3.11.16. Exported with: uv pip freeze --python safety_venv/bin/python
+# Install from the Orcahand-Safe-Assembly/ root (Orca_safety is passed separately, editable):
+#   python3.11 -m venv venv && venv/bin/pip install -r Orca_rl/env/requirements-safety.lock.txt -e './Orca_safety[geometry,safety]'
+absl-py==2.5.1
+cloudpickle==3.1.2
+cmeel==0.61.0
+cmeel-assimp==6.0.5
+cmeel-boost==1.89.0
+cmeel-console-bridge==1.0.2.3
+cmeel-octomap==1.10.0
+cmeel-qhull==8.0.2.1
+cmeel-tinyxml2==10.0.0
+cmeel-urdfdom==4.0.1
+cmeel-zlib==1.3.2
+coal==3.0.2
+eigenpy==3.12.0
+etils==1.14.0
+farama-notifications==0.0.6
+filelock==4.1.1
+fsspec==2026.9.0
+glfw==2.10.2
+grpcio==1.84.0
+gymnasium==1.4.0
+imageio==2.38.1
+imageio-ffmpeg==0.6.0
+iniconfig==2.3.1
+jinja2==3.1.6
+joblib==1.6.0
+libcoal==3.0.2
+libpinocchio==3.9.0
+markdown==3.11
+markupsafe==3.0.4
+mpmath==1.3.0
+mujoco==3.12.0
+networkx==3.6.1
+numpy==2.3.5
+osqp==1.1.3
+packaging==26.3
+pillow==12.3.0
+pin==3.9.0
+pluggy==1.6.0
+protobuf==7.36.2
+pygments==2.21.0
+pyopengl==3.1.10
+pytest==9.1.1
+pyyaml==6.0.3
+scipy==1.17.1
+setuptools==84.0.0
+stable-baselines3==2.9.0
+sympy==1.14.0
+tensorboard==2.21.0
+tensorboard-data-server==0.7.2
+torch==2.14.1
+typing-extensions==4.16.0
+werkzeug==3.1.9
+zipp==4.1.1
+-e git+https://github.com/orcahand/orca_sim.git@05e00dafd0a6eb2186d69d4e351c252a7bcffadd#egg=orca_sim

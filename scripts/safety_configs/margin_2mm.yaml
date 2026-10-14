@@ -1,0 +1,227 @@
+collision_safety:
+  enabled: false
+  pairs:
+  - - right_thumb_mp
+    - right_index_mp
+  - - right_thumb_mp
+    - right_index_pp
+  - - right_thumb_mp
+    - right_index_ip
+  - - right_thumb_pp
+    - right_index_mp
+  - - right_thumb_pp
+    - right_index_pp
+  - - right_thumb_pp
+    - right_index_ip
+  - - right_thumb_ip
+    - right_index_mp
+  - - right_thumb_ip
+    - right_index_pp
+  - - right_thumb_ip
+    - right_index_ip
+  - - right_thumb_dp
+    - right_index_mp
+  - - right_thumb_dp
+    - right_index_pp
+  - - right_thumb_dp
+    - right_index_ip
+  - - right_thumb_mp
+    - right_middle_mp
+  - - right_thumb_mp
+    - right_middle_pp
+  - - right_thumb_mp
+    - right_middle_ip
+  - - right_thumb_pp
+    - right_middle_mp
+  - - right_thumb_pp
+    - right_middle_pp
+  - - right_thumb_pp
+    - right_middle_ip
+  - - right_thumb_ip
+    - right_middle_mp
+  - - right_thumb_ip
+    - right_middle_pp
+  - - right_thumb_ip
+    - right_middle_ip
+  - - right_thumb_dp
+    - right_middle_mp
+  - - right_thumb_dp
+    - right_middle_pp
+  - - right_thumb_dp
+    - right_middle_ip
+  - - right_thumb_mp
+    - right_ring_mp
+  - - right_thumb_mp
+    - right_ring_pp
+  - - right_thumb_mp
+    - right_ring_ip
+  - - right_thumb_pp
+    - right_ring_mp
+  - - right_thumb_pp
+    - right_ring_pp
+  - - right_thumb_pp
+    - right_ring_ip
+  - - right_thumb_ip
+    - right_ring_mp
+  - - right_thumb_ip
+    - right_ring_pp
+  - - right_thumb_ip
+    - right_ring_ip
+  - - right_thumb_dp
+    - right_ring_mp
+  - - right_thumb_dp
+    - right_ring_pp
+  - - right_thumb_dp
+    - right_ring_ip
+  - - right_thumb_mp
+    - right_pinky_mp
+  - - right_thumb_mp
+    - right_pinky_pp
+  - - right_thumb_mp
+    - right_pinky_ip
+  - - right_thumb_pp
+    - right_pinky_mp
+  - - right_thumb_pp
+    - right_pinky_pp
+  - - right_thumb_pp
+    - right_pinky_ip
+  - - right_thumb_ip
+    - right_pinky_mp
+  - - right_thumb_ip
+    - right_pinky_pp
+  - - right_thumb_ip
+    - right_pinky_ip
+  - - right_thumb_dp
+    - right_pinky_mp
+  - - right_thumb_dp
+    - right_pinky_pp
+  - - right_thumb_dp
+    - right_pinky_ip
+  - - right_index_mp
+    - right_middle_mp
+  - - right_index_mp
+    - right_middle_pp
+  - - right_index_mp
+    - right_middle_ip
+  - - right_index_pp
+    - right_middle_mp
+  - - right_index_pp
+    - right_middle_pp
+  - - right_index_pp
+    - right_middle_ip
+  - - right_index_ip
+    - right_middle_mp
+  - - right_index_ip
+    - right_middle_pp
+  - - right_index_ip
+    - right_middle_ip
+  - - right_index_mp
+    - right_ring_mp
+  - - right_index_mp
+    - right_ring_pp
+  - - right_index_mp
+    - right_ring_ip
+  - - right_index_pp
+    - right_ring_mp
+  - - right_index_pp
+    - right_ring_pp
+  - - right_index_pp
+    - right_ring_ip
+  - - right_index_ip
+    - right_ring_mp
+  - - right_index_ip
+    - right_ring_pp
+  - - right_index_ip
+    - right_ring_ip
+  - - right_index_mp
+    - right_pinky_mp
+  - - right_index_mp
+    - right_pinky_pp
+  - - right_index_mp
+    - right_pinky_ip
+  - - right_index_pp
+    - right_pinky_mp
+  - - right_index_pp
+    - right_pinky_pp
+  - - right_index_pp
+    - right_pinky_ip
+  - - right_index_ip
+    - right_pinky_mp
+  - - right_index_ip
+    - right_pinky_pp
+  - - right_index_ip
+    - right_pinky_ip
+  - - right_middle_mp
+    - right_ring_mp
+  - - right_middle_mp
+    - right_ring_pp
+  - - right_middle_mp
+    - right_ring_ip
+  - - right_middle_pp
+    - right_ring_mp
+  - - right_middle_pp
+    - right_ring_pp
+  - - right_middle_pp
+    - right_ring_ip
+  - - right_middle_ip
+    - right_ring_mp
+  - - right_middle_ip
+    - right_ring_pp
+  - - right_middle_ip
+    - right_ring_ip
+  - - right_middle_mp
+    - right_pinky_mp
+  - - right_middle_mp
+    - right_pinky_pp
+  - - right_middle_mp
+    - right_pinky_ip
+  - - right_middle_pp
+    - right_pinky_mp
+  - - right_middle_pp
+    - right_pinky_pp
+  - - right_middle_pp
+    - right_pinky_ip
+  - - right_middle_ip
+    - right_pinky_mp
+  - - right_middle_ip
+    - right_pinky_pp
+  - - right_middle_ip
+    - right_pinky_ip
+  - - right_ring_mp
+    - right_pinky_mp
+  - - right_ring_mp
+    - right_pinky_pp
+  - - right_ring_mp
+    - right_pinky_ip
+  - - right_ring_pp
+    - right_pinky_mp
+  - - right_ring_pp
+    - right_pinky_pp
+  - - right_ring_pp
+    - right_pinky_ip
+  - - right_ring_ip
+    - right_pinky_mp
+  - - right_ring_ip
+    - right_pinky_pp
+  - - right_ring_ip
+    - right_pinky_ip
+  - - right_thumb_ip
+    - right_palm
+  - - right_thumb_dp
+    - right_palm
+  - - right_index_ip
+    - right_palm
+  - - right_middle_ip
+    - right_palm
+  - - right_ring_ip
+    - right_palm
+  - - right_pinky_ip
+    - right_palm
+  parameters:
+    activation_distance: 0.008
+    cbf_eta: 0.2
+    finite_difference_epsilon: 0.0001
+    max_step_rad: null
+    nonlinear_backtracking_steps: 8
+    regularization: 1.0e-06
+    safe_distance: 0.002

@@ -160,9 +160,14 @@ def resolve_tensorboard_dir(run_dir: Path) -> str | None:
     return str(run_dir / "tb")
 
 
-def make_env_fn(seed: int, rank: int, env_kwargs: dict):
+def make_env_fn(seed: int, rank: int, env_kwargs: dict, safety: dict | None = None):
     def _init():
-        env = CubeReorientContinuous(**env_kwargs)
+        if safety is not None:
+            # Imported here: needs the Orca_safety package, which plain training does not.
+            from orca_rl.evaluate_safety import make_safe_env
+            env = make_safe_env(env_kwargs, config_path=safety.get("config"))
+        else:
+            env = CubeReorientContinuous(**env_kwargs)
         env.reset(seed=seed + rank)
         return env
 
@@ -176,8 +181,9 @@ def build_vec_env(
     subproc: bool,
     vecnormalize_path: Path | None = None,
     gamma: float = 0.99,
+    safety: dict | None = None,
 ):
-    fns = [make_env_fn(seed, i, env_kwargs) for i in range(n_envs)]
+    fns = [make_env_fn(seed, i, env_kwargs, safety) for i in range(n_envs)]
     venv = SubprocVecEnv(fns) if (subproc and n_envs > 1) else DummyVecEnv(fns)
     venv = VecMonitor(venv)
 
@@ -300,6 +306,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-log-std", type=float, default=0.0,
                    help="hard cap on log_std (0 => std <= 1). Guards the runaway above")
     p.add_argument("--checkpoint-every", type=int, default=500_000)
+    p.add_argument("--safety", action="store_true",
+                   help="train with the Orca_safety CBF-QP filter between the policy and the servos "
+                        "(v1 only; needs the Orca_safety package and orcahand_description, see "
+                        "evaluate_safety.py). About 25 ms per env step instead of 0.1")
+    p.add_argument("--safety-config", default=None, help="Orca_safety YAML (default: its v1_right.yaml)")
     p.add_argument("--resume", default=None, metavar="MODEL.zip",
                    help="continue training from a saved model; its vecnormalize.pkl "
                         "is picked up from the same folder")
@@ -341,7 +352,9 @@ def main() -> None:
 
     resume_path = Path(args.resume) if args.resume else None
     stats_path = resolve_stats_path(resume_path) if resume_path else None
-    (run_dir / ENV_KWARGS_FILE).write_text(json.dumps(env_kwargs, indent=2, default=float))
+    safety = {"config": args.safety_config} if args.safety else None
+    (run_dir / ENV_KWARGS_FILE).write_text(json.dumps(
+        {**env_kwargs, "safety": safety}, indent=2, default=float))
     if resume_path is not None and resume_path.exists():
         # Resume in whatever observation layout the checkpoint was trained on
         # (54-dim runs 1-8, 71-dim runs 9-17, 74-dim with the goal rotvec).
@@ -358,6 +371,7 @@ def main() -> None:
         subproc=not args.no_subproc,
         vecnormalize_path=stats_path,
         gamma=args.gamma,
+        safety=safety,
     )
     if stats_path is not None and not stats_path.exists():
         print(f"WARNING: {stats_path} not found -- observation statistics restart from "

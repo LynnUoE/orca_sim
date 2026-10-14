@@ -1,0 +1,30 @@
+{
+  "version": "v1",
+  "action_mode": "relative",
+  "action_scale": 0.15,
+  "max_episode_steps": 400,
+  "randomize_physics": false,
+  "goal_mode": "curriculum",
+  "goal_timeout_steps": 150,
+  "drop_mode": "terminate",
+  "shaping_mode": "angle",
+  "obs_include_rotvec": true,
+  "obs_include_fingertips": true,
+  "lookahead_s": 0.15,
+  "lookahead_mix": 0.5,
+  "freeze_potential_off_hand": false,
+  "curriculum_start_deg": 45.0,
+  "curriculum_step_deg": 5.0,
+  "curriculum_metric": "goal_success",
+  "curriculum_window": 40,
+  "curriculum_up_rate": 0.55,
+  "curriculum_down_rate": 0.25,
+  "hold_steps": 10,
+  "success_tolerance_rad": 0.2617993877991494,
+  "align_bonus": 0.0,
+  "spin_penalty": 0.0,
+  "spin_band": 1.0,
+  "safety": {
+    "config": null
+  }
+}

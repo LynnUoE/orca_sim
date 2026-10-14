@@ -1,5 +1,7 @@
 # orca_rl — PPO baseline for OrcaHand in-hand reorientation
 
+> 2026-10-13：安全层相关的代码（`evaluate_safety.py`、`record_safety.py`、`safety_fast.py`、`train.py --safety`）、6 个训练好的模型（`models/`）、锁定的环境（`env/`）和实验脚本（`scripts/`）已同步到这里。安装和运行说明、以及和组员 `Orca_safety` 一起使用的方式见小组仓库 [Orcahand-Safe-Assembly/Orca_rl/SAFETY.zh-CN.md](https://github.com/back2-thebasic/Orcahand-Safe-Assembly/blob/main/Orca_rl/SAFETY.zh-CN.md)。
+
 放到 `orca_sim/` 仓库根目录下（和 `src/`、`random_policy.py` 平级），就能直接跑。
 
 ```
